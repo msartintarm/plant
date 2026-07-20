@@ -30,3 +30,74 @@
   text-align: center;
   padding: 1rem;
 }
+
+.errorDetail {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: #f87171;
+  opacity: 0.8;
+}
+
+.hud {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(15, 15, 20, 0.55);
+  backdrop-filter: blur(4px);
+  color: #e2e8f0;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.hudRow {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.waterButton {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #38bdf8;
+  background: rgba(56, 189, 248, 0.15);
+  color: #7dd3fc;
+  cursor: pointer;
+}
+
+.waterButton:hover {
+  background: rgba(56, 189, 248, 0.3);
+}
+
+.waterButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.autoWaterLabel {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.speciesSelect {
+  font: inherit;
+  font-size: 0.75rem;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 4px;
+  padding: 0.1rem 0.3rem;
+}
+
+.timeScaleSlider {
+  width: 120px;
+}

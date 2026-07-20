@@ -1,0 +1,15 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+await page.goto("http://localhost:3100/");
+await page.waitForSelector("text=Loading engine…", { state: "hidden", timeout: 15000 });
+const slider = await page.getByLabel(/Speed:/);
+await slider.fill("5");
+await page.getByLabel("Auto-water").check();
+await page.waitForTimeout(1000);
+await page.screenshot({ path: "/tmp/claude-1000/-home-mst-Projects-gamez-plant/a6526d9b-9295-413a-a30d-81257b2de24b/scratchpad/zoom2_early.png" });
+await page.waitForTimeout(60000);
+await page.screenshot({ path: "/tmp/claude-1000/-home-mst-Projects-gamez-plant/a6526d9b-9295-413a-a30d-81257b2de24b/scratchpad/zoom2_mid.png" });
+await page.waitForTimeout(90000);
+await page.screenshot({ path: "/tmp/claude-1000/-home-mst-Projects-gamez-plant/a6526d9b-9295-413a-a30d-81257b2de24b/scratchpad/zoom2_late.png" });
+await browser.close();
