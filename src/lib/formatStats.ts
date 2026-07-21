@@ -28,3 +28,21 @@ export function formatPercent(fraction: number): string {
 export function formatHeight(height: number): string {
   return height.toFixed(1);
 }
+
+/// Whole degrees Celsius — the engine's `temperature_c` already varies by a
+/// few degrees over a day/night cycle; showing decimals would just be noise
+/// a player can't act on.
+export function formatTemperature(temperatureC: number): string {
+  return `${Math.round(temperatureC)}°C`;
+}
+
+/// Like `formatPercent`, but deliberately *not* clamped above 100% — soil
+/// nutrient (`Stats::nutrient_level`) has no hard ceiling the way water's
+/// field capacity does (see `SoilConfig::max_nutrient`), so showing it climb
+/// past 100% is the only visible cue a player gets that they're overfeeding
+/// before root damage actually shows up. Still floored at 0% for the same
+/// float-rounding reason `formatPercent` floors its own lower bound.
+export function formatNutrient(fraction: number): string {
+  const flooredAtZero = Math.max(0, fraction);
+  return `${Math.round(flooredAtZero * 100)}%`;
+}

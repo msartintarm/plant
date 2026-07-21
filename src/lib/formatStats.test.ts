@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatHeight, formatPercent, formatTimeOfDay } from "./formatStats";
+import { formatHeight, formatNutrient, formatPercent, formatTemperature, formatTimeOfDay } from "./formatStats";
 
 describe("formatTimeOfDay", () => {
   it("maps 0 to midnight", () => {
@@ -48,5 +48,30 @@ describe("formatHeight", () => {
 
   it("still shows one decimal place for a whole number", () => {
     expect(formatHeight(0)).toBe("0.0");
+  });
+});
+
+describe("formatNutrient", () => {
+  it("formats a plain fraction like formatPercent", () => {
+    expect(formatNutrient(0.5)).toBe("50%");
+  });
+
+  it("does not clamp above 100%, unlike formatPercent", () => {
+    expect(formatNutrient(1.4)).toBe("140%");
+  });
+
+  it("still floors at 0% for slightly-negative float rounding", () => {
+    expect(formatNutrient(-0.0000001)).toBe("0%");
+  });
+});
+
+describe("formatTemperature", () => {
+  it("rounds to the nearest whole degree", () => {
+    expect(formatTemperature(21.4)).toBe("21°C");
+    expect(formatTemperature(21.6)).toBe("22°C");
+  });
+
+  it("handles negative values", () => {
+    expect(formatTemperature(-2.3)).toBe("-2°C");
   });
 });

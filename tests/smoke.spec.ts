@@ -37,6 +37,7 @@ test("the HUD reflects live engine state once it starts running", async ({ page 
   await expect(page.getByText(/Height: \d/)).toBeVisible();
   await expect(page.getByText(/Leaves: \d+ · Branches: \d+/)).toBeVisible();
   await expect(page.getByText(/💧 Water: \d+%/)).toBeVisible();
+  await expect(page.getByText(/🌡️ -?\d+°C/)).toBeVisible();
 
   expect(errors).toEqual([]);
 });

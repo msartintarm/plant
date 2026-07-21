@@ -61,7 +61,7 @@
   gap: 0.9rem;
 }
 
-.waterButton {
+.actionButton {
   font-size: 0.75rem;
   padding: 0.15rem 0.6rem;
   border-radius: 6px;
@@ -71,13 +71,58 @@
   cursor: pointer;
 }
 
-.waterButton:hover {
+.actionButton:hover:not(:disabled) {
   background: rgba(56, 189, 248, 0.3);
 }
 
-.waterButton:disabled {
+.actionButton:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* A gauge row past its warning threshold (low root health, high pest
+   infestation, depleted nutrient) — a nudge to act, not an error state; the
+   plant can still fully recover from any of these. */
+.warning {
+  color: #fca5a5;
+}
+
+.warning .actionButton {
+  border-color: #f87171;
+  background: rgba(248, 113, 113, 0.15);
+  color: #fca5a5;
+}
+
+.warning .actionButton:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.3);
+}
+
+.deadOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  background: rgba(10, 10, 14, 0.75);
+  color: #f1f5f9;
+  font-family: ui-monospace, monospace;
+  text-align: center;
+}
+
+.restartButton {
+  font-size: 0.85rem;
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  border: 1px solid #38bdf8;
+  background: rgba(56, 189, 248, 0.2);
+  color: #e0f2fe;
+  cursor: pointer;
+}
+
+.restartButton:hover {
+  background: rgba(56, 189, 248, 0.35);
 }
 
 .autoWaterLabel {
