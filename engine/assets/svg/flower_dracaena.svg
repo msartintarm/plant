@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-10 -50 20 52">
+  <!-- Anchor (0,0) = base (where it attaches to the stem's tip), same
+       convention as flower_peace_lily.svg/leaf.svg. Real Dracaena flowers
+       are a branched panicle of many small star-shaped, creamy-white
+       blossoms (famously fragrant at night) — a wispy spray on a slender
+       stalk, not one showy bloom like Peace Lily's spathe. -->
+  <polygon points="-0.8,0 0.8,0 0.4,-46 -0.4,-46" fill="#7a8f5c"/>
+  <g fill="#f2ecd8">
+    <polygon points="-4,-21 -3.3,-18.7 -1,-18 -3.3,-17.3 -4,-15 -4.7,-17.3 -7,-18 -4.7,-18.7"/>
+    <polygon points="4,-30 4.7,-27.7 7,-27 4.7,-26.3 4,-24 3.3,-26.3 1,-27 3.3,-27.7"/>
+    <polygon points="-4,-39 -3.3,-36.7 -1,-36 -3.3,-35.3 -4,-33 -4.7,-35.3 -7,-36 -4.7,-36.7"/>
+    <polygon points="4,-48 4.7,-45.7 7,-45 4.7,-44.3 4,-42 3.3,-44.3 1,-45 3.3,-45.7"/>
+  </g>
+</svg>

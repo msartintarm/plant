@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-15 -45 30 47">
+  <!-- Anchor (0,0) = base (where it attaches to the stem's tip), same
+       convention as leaf.svg. A real Peace Lily (Spathiphyllum) bloom: a
+       white spathe (a modified leaf) wrapped around a small yellow-green
+       spadix — also reused for Pothos, since both are Araceae with the
+       same spathe/spadix flower structure (see PlantConfig::pothos's own
+       flowering doc comment on why that bloom is essentially never seen
+       in practice anyway). -->
+  <path d="M0,0 Q-12,-10 -10,-25 Q-8,-40 0,-42 Q8,-40 10,-25 Q12,-10 0,0 Z" fill="#f5f5f0"/>
+  <ellipse cx="0" cy="-24" rx="2.2" ry="9" fill="#d9c94a"/>
+</svg>

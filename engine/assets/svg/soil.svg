@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-22 0 44 42">
+  <!-- Anchor (0,0) = top-center of the pot's rim, same as pot.svg. Now
+       fills pot.svg's whole hollowed-out interior (see that file's own
+       doc comment) instead of just a thin cap at the rim — hollowing the
+       pot out only reveals something if soil actually fills the gap,
+       rather than leaving an empty window onto the wall behind it. -->
+  <polygon points="-21,2 21,2 13,41 -13,41" fill="#3b2a1d"/>
+</svg>

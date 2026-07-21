@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-10 -65 20 70">
+  <!-- Anchor (0,0) = bottom-center. Segments stack tip-to-base by chaining
+       anchors, so a taller plant is more of these, not a bigger one. -->
+  <polygon points="-4,0 4,0 2,-60 -2,-60" fill="#5f7a45"/>
+</svg>

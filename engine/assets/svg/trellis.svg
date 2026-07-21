@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -63 16 68">
+  <!-- Anchor (0,0) = base, planted in the pot alongside the stem. Top of
+       the support sits at y=-60 — same local-height convention
+       stem_segment.svg uses (see scene::STEM_LOCAL_HEIGHT), reused
+       directly (not a separate constant) so a trellis of a given
+       PlantConfig::trellis_height renders exactly as tall as the plant's
+       own stem would reach at that same height — see
+       scene::trellis_transform. A simple ladder silhouette (pole + rungs)
+       reads clearly as "support structure," not another stem segment. -->
+  <rect x="-1.5" y="-60" width="3" height="60" fill="#8a6a4a"/>
+  <rect x="-6" y="-45" width="12" height="2.5" fill="#8a6a4a"/>
+  <rect x="-6" y="-30" width="12" height="2.5" fill="#8a6a4a"/>
+  <rect x="-6" y="-15" width="12" height="2.5" fill="#8a6a4a"/>
+</svg>

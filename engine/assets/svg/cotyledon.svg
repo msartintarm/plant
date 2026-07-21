@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-9 -22 18 24">
+  <!-- Anchor (0,0) = base (petiole attachment), not center. Simpler and
+       rounder than leaf.svg — real cotyledons (seed leaves) usually lack
+       the venation/shape of true leaves. -->
+  <ellipse cx="0" cy="-11" rx="7" ry="11" fill="#8fc47a"/>
+</svg>

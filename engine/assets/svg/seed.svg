@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -2 12 10">
+  <!-- Anchor (0,0) = soil surface, same offset as pot/soil — the seed sits
+       mostly buried, with a small bump visible above the line. -->
+  <ellipse cx="0" cy="2" rx="5" ry="4" fill="#7a5636"/>
+</svg>

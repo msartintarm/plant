@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 -6 22 12">
+  <!-- Anchor (0,0) = where this root emerges from the stem. Reaches
+       toward +x by default (the trellis's side in the common case — see
+       scene::aerial_root_transform, which flips 180° if trellis_x_offset
+       is negative). A short forked root pressing flat against a support to
+       grip it, *not* a coiling tendril spring — real Pothos aerial roots
+       are adventitious roots, not a modified leaf/stem the way a pea's
+       tendril is (see sim::plant::AerialRoot's doc comment). -->
+  <polygon points="0,-1 18,-3 20,-1 18,1 0,1" fill="#c9b896"/>
+  <polygon points="12,-2 17,-5 19,-4 15,-1" fill="#c9b896"/>
+</svg>

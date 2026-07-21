@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-30 -5 60 55">
+  <!-- Anchor (0,0) = top-center of the rim, where the stem attaches.
+       Drawn as a hollow outline — a rim lip plus left/right/bottom wall
+       strips tracing the original solid trapezoid's edges — rather than a
+       filled silhouette, so soil.svg (and roots.svg, drawn on top of it)
+       show through the middle where the solid interior used to be. A
+       stand-in for real pot transparency: this renderer draws every mesh
+       fully opaque, back-to-front, with no alpha blending in its pipeline
+       (see render/mod.rs's `RenderPipelineDescriptor`), so "hollow the
+       shape out and let what's behind show through the gap" is the cheap
+       version of that effect, not real translucency. -->
+  <rect x="-27" y="-4" width="54" height="9" fill="#c98456"/>
+  <polygon points="-25,0 -17,45 -13,45 -21,0" fill="#a86b45"/>
+  <polygon points="25,0 17,45 13,45 21,0" fill="#a86b45"/>
+  <polygon points="-17,45 17,45 13,41 -13,41" fill="#a86b45"/>
+</svg>

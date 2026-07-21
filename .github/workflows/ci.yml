@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine-tests:
+    name: Rust engine tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('engine/Cargo.lock') }}
+      - run: cargo test
+        working-directory: engine
+
+  web-checks:
+    name: Web typecheck, lint, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('engine/Cargo.lock') }}
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      # tsc/eslint don't need the real wasm build to typecheck (the
+      # EngineModule interface is hand-declared), but building it here keeps
+      # this job honest about the same wasm-pack step the production build
+      # depends on.
+      - run: npm run wasm:build
+        working-directory: web
+      - run: npx tsc --noEmit
+        working-directory: web
+      - run: npx eslint src/
+        working-directory: web
+      - run: npm run test:unit
+        working-directory: web

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-15 -15 30 30">
+  <!-- Anchor (0,0) = center. Not placed in the scene yet — the day/night
+       pass positions this along the sun's arc. -->
+  <circle cx="0" cy="0" r="15" fill="#ffd76a"/>
+</svg>

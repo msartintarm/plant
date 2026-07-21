@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-20 -52 40 54">
+  <!-- Anchor (0,0) = base of the blade (petiole attachment point), not its
+       center. Drawn pointing straight up; individual leaves are rotated at
+       the point they're placed, not re-authored per side. -->
+  <path d="M0,0 Q-18,-15 -8,-35 Q-4,-48 0,-50 Q4,-48 8,-35 Q18,-15 0,0 Z" fill="#5a9c4e"/>
+  <path d="M0,-3 L-1.2,-46 L1.2,-46 Z" fill="#3f7238"/>
+</svg>

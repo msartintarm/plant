@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-30 -40 60 80">
+  <!-- Anchor (0,0) = center of the window. Sky pane is a static placeholder
+       color for now; the day/night pass replaces it with real sky. -->
+  <rect x="-30" y="-40" width="60" height="80" fill="#e8dcc8"/>
+  <rect x="-25" y="-35" width="50" height="70" fill="#bcdff0"/>
+  <rect x="-1.5" y="-35" width="3" height="70" fill="#e8dcc8"/>
+  <rect x="-25" y="-1.5" width="50" height="3" fill="#e8dcc8"/>
+</svg>

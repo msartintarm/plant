@@ -1,0 +1,33 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+
+# wgpu and the JS/DOM bridge only make sense (and only compile cleanly) when
+# targeting the browser — kept off the native build so `cargo test` (used by
+# the sim/ unit tests below) never has to link them.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["webgpu", "webgl", "wgsl", "std"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Window", "Performance"] }
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
+
+# Runs on the host at build time regardless of the crate's own target —
+# parses/tessellates engine/assets/svg/*.svg into static vertex/index data
+# baked into the wasm binary, so the shipped code never links usvg/lyon.
+[build-dependencies]
+usvg = { version = "0.47", default-features = false }
+lyon = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
