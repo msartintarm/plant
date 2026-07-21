@@ -74,6 +74,14 @@ interface EngineSimulation {
   has_hover_target(): boolean;
   prune_hovered(): boolean;
   stats(): EngineStats;
+  plant_count(): number;
+  plant_species(index: number): string;
+  selected_plant_index(): number;
+  set_selected_plant(index: number): void;
+  add_plant(species: string): boolean;
+  inventory_count(): number;
+  inventory_species(index: number): string;
+  plant_cutting(index: number): boolean;
   free(): void;
 }
 
@@ -115,6 +123,19 @@ const SPECIES_OPTIONS: { value: string; label: string }[] = [
   { value: "peace_lily", label: "Peace Lily (rosette)" },
   { value: "pothos", label: "Pothos (climbing)" },
 ];
+
+// A short label/icon for a species name coming back from the engine (plant
+// tabs, inventory items) — falls back to the raw name for anything not in
+// `SPECIES_OPTIONS` rather than showing nothing.
+const SPECIES_ICONS: Record<string, string> = {
+  dracaena: "🌴",
+  peace_lily: "🌼",
+  pothos: "🍃",
+};
+
+function speciesLabel(species: string): string {
+  return SPECIES_OPTIONS.find((option) => option.value === species)?.label ?? species;
+}
 
 // One short, actionable clause per cause — the death overlay stays to 1-2
 // sentences total.
@@ -163,6 +184,22 @@ export default function EngineCanvas() {
   const [species, setSpecies] = useState(DEFAULT_SPECIES);
   const [potPosition, setPotPosition] = useState(0);
   const [showSeedInfo, setShowSeedInfo] = useState(false);
+  // One entry per plant currently in the room, its own species name (see
+  // `Simulation::plant_species`) — index lines up with `set_selected_
+  // plant`'s own `index` param. Refreshed every poll alongside `stats`,
+  // not just on the actions that change it, so switching plants/adding one
+  // elsewhere always shows the room's real current state.
+  const [plantTabs, setPlantTabs] = useState<string[]>([]);
+  const [selectedPlantIndex, setSelectedPlantIndex] = useState(0);
+  // Which species a new plant (`handleAddPlant`) should grow as — separate
+  // from the HUD's own `species` selector above, which instead *changes*
+  // the currently-selected plant's species (a destructive reset — see
+  // `handleSpeciesChange`). Conflating the two would mean picking a species
+  // to grow a second plant with also nukes whichever plant is selected.
+  const [newPlantSpecies, setNewPlantSpecies] = useState(DEFAULT_SPECIES);
+  // One entry per stem cutting waiting to be planted (see `Simulation::
+  // take_cutting`/`plant_cutting`), its own species name.
+  const [inventory, setInventory] = useState<string[]>([]);
   // Captured once, at mount, rather than read fresh each render — this has
   // to be the *exact* same date actually handed to `Simulation.create`
   // below, not a second, independently-taken `new Date()` that could in
@@ -267,7 +304,8 @@ export default function EngineCanvas() {
     const interval = setInterval(() => {
       const sim = simRef.current;
       if (!sim) return;
-      setStats(sim.stats());
+      const currentStats = sim.stats();
+      setStats(currentStats);
       // A pointer cursor over a hover-picked leaf or stem segment is the
       // only affordance that the prune tool is about to do something on
       // click — set directly on the element (not React state) since this
@@ -275,6 +313,28 @@ export default function EngineCanvas() {
       // else here, not trigger its own render.
       const canvas = canvasRef.current;
       if (canvas) canvas.style.cursor = sim.has_hover_target() ? "pointer" : "default";
+
+      // Every plant in the room (see `Simulation::plant_species`), the
+      // room's shared cutting inventory, and which plant is currently
+      // selected — polled fresh every cycle (not just after an action that
+      // changes one of them) so a plant added or a cutting taken/planted
+      // from any code path always shows up promptly.
+      const plantCount = sim.plant_count();
+      const tabs: string[] = [];
+      for (let i = 0; i < plantCount; i++) tabs.push(sim.plant_species(i));
+      setPlantTabs(tabs);
+      const selected = sim.selected_plant_index();
+      setSelectedPlantIndex(selected);
+      // Keeps the HUD's own species selector and pot-placement slider
+      // showing *this* plant's real state rather than whatever was left
+      // over from a previously-selected plant.
+      if (tabs[selected]) setSpecies(tabs[selected]);
+      setPotPosition(currentStats.pot_position);
+
+      const inventoryCount = sim.inventory_count();
+      const items: string[] = [];
+      for (let i = 0; i < inventoryCount; i++) items.push(sim.inventory_species(i));
+      setInventory(items);
     }, STATS_POLL_MS);
     return () => clearInterval(interval);
   }, [status]);
@@ -351,6 +411,36 @@ export default function EngineCanvas() {
     simRef.current?.set_species(next);
   }
 
+  // Switches which plant the HUD/actions target — every plant in the room
+  // keeps rendering/growing regardless (see `Simulation::set_selected_
+  // plant`'s own doc comment), this just changes which one this component
+  // reads/controls. Clears the stale stats snapshot the same way switching
+  // species does, since the newly-selected plant's own numbers are what
+  // should show, not whatever the previous one's last poll left behind.
+  function handleSelectPlant(index: number) {
+    simRef.current?.set_selected_plant(index);
+    setStats(null);
+  }
+
+  // Grows a brand-new plant in its own pot along the windowsill (see
+  // `Simulation::add_plant`/`scene::plant_slot_base_anchor`) — under
+  // `newPlantSpecies`, not the HUD's own `species` selector (that one
+  // instead resets whichever plant is *currently selected* — conflating
+  // the two would mean picking a species for a new plant also nukes the
+  // one you're looking at). A no-op past `MAX_PLANTS`; the room's plant
+  // count updates on the next poll regardless.
+  function handleAddPlant() {
+    simRef.current?.add_plant(newPlantSpecies);
+  }
+
+  // Spends one inventory cutting to grow it into its own new plant (see
+  // `Simulation::plant_cutting`) — selects that new plant on success, same
+  // as `add_plant`, so the HUD immediately shows what was just planted.
+  function handlePlantCutting(index: number) {
+    const planted = simRef.current?.plant_cutting(index);
+    if (planted) setStats(null);
+  }
+
   return (
     <div className={styles.wrapper}>
       <canvas ref={canvasRef} className={styles.canvas} />
@@ -382,6 +472,42 @@ export default function EngineCanvas() {
       {stats && (
         <div className={styles.toolTag} title="The only tool for now — hover a leaf and click to remove it">
           🔪 Prune <em>(active)</em>
+        </div>
+      )}
+      {stats && (
+        <div className={styles.plantSelectorBar}>
+          {plantTabs.map((tabSpecies, index) => (
+            <button
+              key={index}
+              type="button"
+              onClick={() => handleSelectPlant(index)}
+              className={`${styles.plantTab} ${index === selectedPlantIndex ? styles.plantTabSelected : ""}`}
+              title={speciesLabel(tabSpecies)}
+            >
+              {SPECIES_ICONS[tabSpecies] ?? "🪴"}
+              {index + 1}
+            </button>
+          ))}
+          <select
+            aria-label="New plant species"
+            value={newPlantSpecies}
+            onChange={(e) => setNewPlantSpecies(e.target.value)}
+            className={styles.speciesSelect}
+          >
+            {SPECIES_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={handleAddPlant}
+            className={styles.plantTab}
+            title="Add a new plant to the room"
+          >
+            + Add
+          </button>
         </div>
       )}
       {stats && (
@@ -542,6 +668,26 @@ export default function EngineCanvas() {
               className={styles.timeScaleSlider}
             />
           </div>
+        </div>
+      )}
+      {stats && inventory.length > 0 && (
+        <div className={styles.inventoryPanel}>
+          <div className={styles.inventoryTitle}>🧺 Cuttings</div>
+          {inventory.map((itemSpecies, index) => (
+            <div key={index} className={styles.inventoryRow}>
+              <span>
+                {SPECIES_ICONS[itemSpecies] ?? "🌿"} {speciesLabel(itemSpecies)}
+              </span>
+              <button
+                type="button"
+                onClick={() => handlePlantCutting(index)}
+                className={styles.actionButton}
+                title="Grow this cutting into its own new plant"
+              >
+                Plant
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
