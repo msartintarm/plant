@@ -14,6 +14,49 @@ function collectConsoleErrors(page: Page): string[] {
   return errors;
 }
 
+// Regression test for a real incident: a WGSL shader change (the cursor
+// specular highlight) started reading `instance.*` fields from the
+// fragment stage, but the group(0) bind group layout was still declared
+// `visibility: VERTEX` only (correct back when only the vertex stage ever
+// touched it). That's a *pipeline creation* validation error, not a
+// runtime one — it doesn't just skip the new effect, it invalidates the
+// whole render pipeline, which invalidates every command buffer built
+// against it, which means literally nothing draws. The console-error
+// checks already threaded through every test below would have caught this
+// (WebGPU reports it as a `console.error`), but nothing was actually re-run
+// against a real browser after that change landed — this test exists so
+// there's always at least one that's explicitly about "does the canvas
+// have real content," not just "did anything throw."
+//
+// A plain `drawImage`+`getImageData` readback of the canvas reliably
+// returns all-zero pixels for a WebGPU-backed canvas in this Playwright/
+// Chromium setup regardless of what's actually rendered (confirmed by hand
+// against a real screenshot showing correct output while that technique
+// reported nothing) — so this instead screenshots the canvas (the browser's
+// own compositor, not JS-side canvas readback) and checks the PNG's byte
+// size. A solid-color/blank canvas compresses to ~3KB; this scene's actual
+// mix of colors/edges/gradients compresses to 50KB+, so a wide, low
+// threshold cleanly separates "genuinely rendering" from "blank" without
+// needing a PNG decoder or a checked-in baseline image to compare against.
+test("the canvas renders real (non-blank) content, not just a solid clear color", async ({ page }) => {
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  // A few real frames, not just the first one — some effects (the cursor
+  // light/specular, the pick pass) only run once the loop has been going a
+  // moment.
+  await page.waitForTimeout(2_000);
+
+  const screenshot = await page.locator("canvas").screenshot();
+  expect(
+    screenshot.length,
+    `canvas screenshot was only ${screenshot.length} bytes — that's blank-canvas-sized, not a rendered scene`,
+  ).toBeGreaterThan(10_000);
+
+  expect(errors).toEqual([]);
+});
+
 test("loads the page and the wasm engine without erroring", async ({ page }) => {
   const errors = collectConsoleErrors(page);
 
@@ -81,6 +124,34 @@ test("the auto-water toggle enables without erroring and disables the manual but
   await expect(waterButton).toBeEnabled();
 });
 
+test("a default no-input session grows past the first leaf (real browser/wasm loop, not the native sim harness)", async ({
+  page,
+}) => {
+  // Regression test for a real browser-vs-native divergence: `cargo test`
+  // playthrough harnesses predicted multiple leaves within seconds, but
+  // manual testing showed the actual page stuck at "Leaves: 1" for a full
+  // minute. Running through the real render loop (requestAnimationFrame,
+  // actual wasm calls) is the only way to catch a bug that's specific to
+  // that path rather than the native step-by-step harness.
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+
+  // Speed up sim time so this doesn't need a full real minute of wall-clock
+  // waiting — 5x is the slider's own max.
+  const slider = page.getByLabel(/Speed:/);
+  await slider.fill("5");
+
+  await page.waitForTimeout(15_000);
+
+  const leafText = await page.getByText(/Leaves: \d+/).textContent();
+  const leafCount = Number(leafText?.match(/Leaves: (\d+)/)?.[1]);
+  expect(leafCount, `expected leaf growth past the first leaf, got "${leafText}"`).toBeGreaterThan(1);
+
+  expect(errors).toEqual([]);
+});
+
 test("switching species resets the HUD and doesn't error", async ({ page }) => {
   const errors = collectConsoleErrors(page);
 
@@ -97,5 +168,52 @@ test("switching species resets the HUD and doesn't error", async ({ page }) => {
   await expect(page.getByText(/Branches: 0/)).toBeVisible({ timeout: 2_000 });
 
   await page.waitForTimeout(500);
+  expect(errors).toEqual([]);
+});
+
+// Regression test for a real bug report: the moon's phase looked frozen
+// across a session with a few restarts in it. Root cause was `render::mod`
+// driving the moon off `Plant::total_time` (which resets to 0 on every
+// restart/species-switch/cutting) instead of a persistent session clock —
+// every restart snapped the moon back near its starting phase. `sim::moon`'s
+// own design is a real, ongoing astronomical cycle that shouldn't care
+// whether the current plant is brand new, so this asserts the fix directly:
+// switching species must never move the displayed moon phase backward.
+test("the moon's phase keeps advancing across a species switch instead of resetting", async ({ page }) => {
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+
+  await page.getByRole("button", { name: "🌱 Seed info" }).click();
+  const moonReading = page.getByText(/Moon: \d+% lit/);
+  await expect(moonReading).toBeVisible();
+
+  const slider = page.getByLabel(/Speed:/);
+  await slider.fill("5");
+  await page.waitForTimeout(2_000);
+
+  const readMoonPercent = async () => {
+    const text = await moonReading.textContent();
+    const match = text?.match(/Moon: (\d+)% lit/);
+    return match ? Number(match[1]) : null;
+  };
+
+  const beforeSwitch = await readMoonPercent();
+  expect(beforeSwitch, `couldn't read the moon reading from "${await moonReading.textContent()}"`).not.toBeNull();
+
+  const speciesSelect = page.getByLabel("Species:");
+  await speciesSelect.selectOption("pothos");
+  await expect(page.getByText(/Branches: 0/)).toBeVisible({ timeout: 2_000 });
+
+  await page.waitForTimeout(2_000);
+  const afterSwitch = await readMoonPercent();
+  expect(afterSwitch, `couldn't read the moon reading from "${await moonReading.textContent()}"`).not.toBeNull();
+
+  expect(
+    afterSwitch,
+    `moon reading went from ${beforeSwitch}% to ${afterSwitch}% across a species switch — it should only ever move forward`,
+  ).toBeGreaterThanOrEqual(beforeSwitch!);
+
   expect(errors).toEqual([]);
 });

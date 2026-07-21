@@ -80,20 +80,41 @@
   cursor: default;
 }
 
-/* A gauge row past its warning threshold (low root health, high pest
-   infestation, depleted nutrient) — a nudge to act, not an error state; the
-   plant can still fully recover from any of these. */
-.warning {
+/* Every plant-monitoring gauge is tinted by how it's currently affecting
+   the plant (see src/lib/healthTiers.ts) — not just a red flag once
+   something's actually wrong, but a genuine three-tier reading so "this is
+   fine" is as visible as "this needs attention." */
+.tierGood {
+  color: #86efac;
+}
+
+.tierCaution {
+  color: #fcd34d;
+}
+
+.tierCaution .actionButton {
+  border-color: #fbbf24;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fcd34d;
+}
+
+.tierCaution .actionButton:hover:not(:disabled) {
+  background: rgba(251, 191, 36, 0.3);
+}
+
+/* A nudge to act, not an error state — the plant can still fully recover
+   from any of these. */
+.tierBad {
   color: #fca5a5;
 }
 
-.warning .actionButton {
+.tierBad .actionButton {
   border-color: #f87171;
   background: rgba(248, 113, 113, 0.15);
   color: #fca5a5;
 }
 
-.warning .actionButton:hover:not(:disabled) {
+.tierBad .actionButton:hover:not(:disabled) {
   background: rgba(248, 113, 113, 0.3);
 }
 
@@ -123,6 +144,121 @@
 
 .restartButton:hover {
   background: rgba(56, 189, 248, 0.35);
+}
+
+/* Groups every top-right badge (season plaque, seed-info tag/panel) into
+   one stack so they don't have to independently guess each other's height
+   to avoid overlapping. */
+.topRightStack {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.4rem;
+}
+
+/* Styled to read as a small wall-mounted plaque/calendar card rather than
+   another HUD stat row — deliberately positioned away from the bottom-left
+   stats block and given its own "hanging on the wall" treatment (a wood-tone
+   card, a subtle pin/nail at the top) to match the scene's own wall-
+   integrated seasonal tint (see scene::seasonal_wall_tint) rather than
+   looking like a floating debug overlay. */
+.seasonPlaque {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 4px;
+  background: linear-gradient(160deg, #8a6a4a, #6b4f36);
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.35);
+  color: #f5ead9;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  line-height: 1.25;
+}
+
+.seasonPlaque::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+.seasonIcon {
+  font-size: 1.1rem;
+}
+
+/* The currently-selected tool — top-left per its own design, distinct from
+   the season plaque's top-right "world state" placement. Prune is the only
+   tool for now (always active), but this is a tag, not a toggle, so a
+   second tool later just becomes another option here rather than a
+   layout change. */
+.toolTag {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  background: rgba(15, 15, 20, 0.55);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e2e8f0;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+}
+
+/* The seed-info toggle — sits below the season plaque in the shared
+   .topRightStack; clicking it shows/hides the panel describing what the
+   moon cycle was actually seeded from (see Simulation::create's
+   seed_year/month/day params). */
+.seedTagRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+}
+
+.seedTag {
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(15, 15, 20, 0.55);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e2e8f0;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.seedTag:hover {
+  background: rgba(15, 15, 20, 0.7);
+}
+
+.seedInfoPanel {
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  background: rgba(15, 15, 20, 0.75);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #cbd5e1;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .autoWaterLabel {

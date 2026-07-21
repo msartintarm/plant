@@ -9,7 +9,26 @@ import {
   formatTemperature,
   formatTimeOfDay,
 } from "@/lib/formatStats";
+import {
+  humidityTier,
+  nutrientTier,
+  pestTier,
+  rootHealthTier,
+  temperatureTier,
+  waterTier,
+  type HealthTier,
+} from "@/lib/healthTiers";
 import styles from "./EngineCanvas.module.css";
+
+// Maps a gauge's current tier (see src/lib/healthTiers.ts) to its CSS
+// module class — "good" gets its own subtle green rather than falling back
+// to the default text color, so a healthy reading is a positive, visible
+// signal rather than just the absence of a warning.
+function tierClassName(tier: HealthTier): string {
+  if (tier === "bad") return styles.tierBad;
+  if (tier === "caution") return styles.tierCaution;
+  return styles.tierGood;
+}
 
 interface EngineStats {
   day_progress: number;
@@ -26,12 +45,17 @@ interface EngineStats {
   pest_infestation: number;
   day_length_factor: number;
   pot_position: number;
+  death_cause: string;
+  season: string;
+  days_elapsed: number;
+  hover_active: boolean;
+  moon_illuminated_fraction: number;
 }
 
 interface EngineSimulation {
   start(): void;
   stop(): void;
-  resize(width: number, height: number): void;
+  resize(width: number, height: number, devicePixelRatio: number): void;
   water(amount: number): void;
   fertilize(amount: number): void;
   mist(amount: number): void;
@@ -45,6 +69,10 @@ interface EngineSimulation {
   set_auto_water(enabled: boolean): void;
   set_species(species: string): void;
   restart(): void;
+  set_pointer_position(x: number, y: number): void;
+  clear_pointer_position(): void;
+  has_hover_target(): boolean;
+  prune_hovered(): boolean;
   stats(): EngineStats;
   free(): void;
 }
@@ -52,9 +80,24 @@ interface EngineSimulation {
 interface EngineModule {
   default: (input?: unknown) => Promise<unknown>;
   Simulation: {
-    create(canvas: HTMLCanvasElement): Promise<EngineSimulation>;
+    create(
+      canvas: HTMLCanvasElement,
+      devicePixelRatio: number,
+      seedYear: number,
+      seedMonth: number,
+      seedDay: number,
+    ): Promise<EngineSimulation>;
   };
 }
+
+// Location is display-only (see the seed-info tag in the JSX below) — the
+// moon's *phase* doesn't depend on where you are, only real moonrise/set
+// *timing* would, and this stylized side-profile scene doesn't model that
+// at all (see engine/src/sim/moon.rs). Fixed rather than pulled from the
+// browser's geolocation API: there's no actual calculation for a real
+// location to feed, so asking for that permission would just be a prompt
+// with nothing behind it.
+const SEED_LOCATION = "San Francisco, CA";
 
 type Status = "loading" | "ready" | "error";
 
@@ -73,12 +116,19 @@ const SPECIES_OPTIONS: { value: string; label: string }[] = [
   { value: "pothos", label: "Pothos (climbing)" },
 ];
 
-// Below this, a gauge's row switches to the warning style — a plant can
-// still recover from any of these, but a player should notice before it
-// gets there.
-const ROOT_HEALTH_WARNING_THRESHOLD = 0.4;
-const PEST_WARNING_THRESHOLD = 0.4;
-const NUTRIENT_WARNING_THRESHOLD = 0.15;
+// One short, actionable clause per cause — the death overlay stays to 1-2
+// sentences total.
+const DEATH_EXPLANATIONS: Record<string, string> = {
+  "Root rot": "Water it less often next time.",
+  Starvation: "Give it more light or water next time.",
+};
+
+const SEASON_ICONS: Record<string, string> = {
+  Spring: "🌱",
+  Summer: "🌻",
+  Autumn: "🍂",
+  Winter: "❄️",
+};
 
 // Sizes the canvas's backing pixel buffer to match how large it's actually
 // rendered (times devicePixelRatio, for crisp output on hi-DPI displays) —
@@ -94,6 +144,14 @@ function syncCanvasBackingSize(canvas: HTMLCanvasElement): { width: number; heig
   return { width, height };
 }
 
+// Canvas-relative CSS pixels — what `Simulation::set_pointer_position`
+// expects (see that method's own doc comment on why it takes CSS pixels,
+// not the devicePixelRatio-scaled backing-buffer ones `resize` takes).
+function canvasRelativePosition(canvas: HTMLCanvasElement, clientX: number, clientY: number): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  return { x: clientX - rect.left, y: clientY - rect.top };
+}
+
 export default function EngineCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simRef = useRef<EngineSimulation | null>(null);
@@ -104,6 +162,12 @@ export default function EngineCanvas() {
   const [autoWater, setAutoWater] = useState(false);
   const [species, setSpecies] = useState(DEFAULT_SPECIES);
   const [potPosition, setPotPosition] = useState(0);
+  const [showSeedInfo, setShowSeedInfo] = useState(false);
+  // Captured once, at mount, rather than read fresh each render — this has
+  // to be the *exact* same date actually handed to `Simulation.create`
+  // below, not a second, independently-taken `new Date()` that could in
+  // principle land a moment later.
+  const [seedDate] = useState(() => new Date());
 
   useEffect(() => {
     let cancelled = false;
@@ -121,7 +185,13 @@ export default function EngineCanvas() {
         if (cancelled) return;
 
         syncCanvasBackingSize(canvas);
-        const created = await mod.Simulation.create(canvas);
+        const created = await mod.Simulation.create(
+          canvas,
+          window.devicePixelRatio || 1,
+          seedDate.getFullYear(),
+          seedDate.getMonth() + 1, // JS months are 0-indexed, the engine's aren't
+          seedDate.getDate(),
+        );
         if (cancelled) {
           // React StrictMode can invoke this effect twice in dev — if the
           // cleanup below already fired before create() resolved, stop
@@ -149,19 +219,45 @@ export default function EngineCanvas() {
       const canvas = canvasRef.current;
       if (!canvas || !simRef.current) return;
       const { width, height } = syncCanvasBackingSize(canvas);
-      simRef.current.resize(width, height);
+      simRef.current.resize(width, height, window.devicePixelRatio || 1);
+    }
+
+    // The prune tool — always active for now (see the tool badge in the
+    // JSX below), so any hover/click over the canvas targets whatever leaf
+    // is currently under the cursor (see `Simulation::set_pointer_position`
+    // and its GPU pick-pass doc comment for how that's actually resolved).
+    function handlePointerMove(event: PointerEvent) {
+      const canvas = canvasRef.current;
+      if (!canvas || !simRef.current) return;
+      const { x, y } = canvasRelativePosition(canvas, event.clientX, event.clientY);
+      simRef.current.set_pointer_position(x, y);
+    }
+
+    function handlePointerLeave() {
+      simRef.current?.clear_pointer_position();
+    }
+
+    function handleClick() {
+      simRef.current?.prune_hovered();
     }
 
     load();
     window.addEventListener("resize", handleResize);
+    const canvasEl = canvasRef.current;
+    canvasEl?.addEventListener("pointermove", handlePointerMove);
+    canvasEl?.addEventListener("pointerleave", handlePointerLeave);
+    canvasEl?.addEventListener("click", handleClick);
     return () => {
       cancelled = true;
       window.removeEventListener("resize", handleResize);
+      canvasEl?.removeEventListener("pointermove", handlePointerMove);
+      canvasEl?.removeEventListener("pointerleave", handlePointerLeave);
+      canvasEl?.removeEventListener("click", handleClick);
       simRef.current?.stop();
       simRef.current?.free();
       simRef.current = null;
     };
-  }, []);
+  }, [seedDate]);
 
   // A separate effect (rather than folding this into the load effect above)
   // since it only needs `status`, not anything from the load/cleanup
@@ -172,6 +268,13 @@ export default function EngineCanvas() {
       const sim = simRef.current;
       if (!sim) return;
       setStats(sim.stats());
+      // A pointer cursor over a hover-picked leaf or stem segment is the
+      // only affordance that the prune tool is about to do something on
+      // click — set directly on the element (not React state) since this
+      // only needs to happen at the same coarse poll rate as everything
+      // else here, not trigger its own render.
+      const canvas = canvasRef.current;
+      if (canvas) canvas.style.cursor = sim.has_hover_target() ? "pointer" : "default";
     }, STATS_POLL_MS);
     return () => clearInterval(interval);
   }, [status]);
@@ -267,10 +370,49 @@ export default function EngineCanvas() {
       )}
       {isDead && (
         <div className={styles.deadOverlay}>
-          <p>💀 Your plant has died.</p>
+          <p>
+            💀 Your plant died{stats?.death_cause ? ` of ${stats.death_cause.toLowerCase()}` : ""}.
+            {stats?.death_cause && DEATH_EXPLANATIONS[stats.death_cause] && ` ${DEATH_EXPLANATIONS[stats.death_cause]}`}
+          </p>
           <button type="button" onClick={handleRestart} className={styles.restartButton}>
             Start a new seed
           </button>
+        </div>
+      )}
+      {stats && (
+        <div className={styles.toolTag} title="The only tool for now — hover a leaf and click to remove it">
+          🔪 Prune <em>(active)</em>
+        </div>
+      )}
+      {stats && (
+        <div className={styles.topRightStack}>
+          <div className={styles.seasonPlaque} title={`Day ${stats.days_elapsed} of this plant's life`}>
+            <span className={styles.seasonIcon}>{SEASON_ICONS[stats.season] ?? "🗓️"}</span>
+            <span className={styles.seasonText}>
+              {stats.season}
+              <br />
+              Day {stats.days_elapsed}
+            </span>
+          </div>
+          <div className={styles.seedTagRow}>
+            <button
+              type="button"
+              className={styles.seedTag}
+              onClick={() => setShowSeedInfo((shown) => !shown)}
+              aria-expanded={showSeedInfo}
+            >
+              🌱 Seed info
+            </button>
+            {showSeedInfo && (
+              <div className={styles.seedInfoPanel} title="Grounds the moon's starting phase in a real date">
+                Seeded {seedDate.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}
+                <br />
+                {SEED_LOCATION}
+                <br />
+                Moon: {formatPercent(stats.moon_illuminated_fraction)} lit
+              </div>
+            )}
+          </div>
         </div>
       )}
       {stats && (
@@ -289,7 +431,9 @@ export default function EngineCanvas() {
             <span>
               {stats.stage} · {stats.is_daytime ? "☀️" : "🌙"} {formatTimeOfDay(stats.day_progress)}
             </span>
-            <span>🌡️ {formatTemperature(stats.temperature_c)}</span>
+            <span className={tierClassName(temperatureTier(stats.temperature_c))}>
+              🌡️ {formatTemperature(stats.temperature_c)}
+            </span>
             <span title="How much winter's shorter days are slowing growth right now">
               {stats.day_length_factor > 0.85 ? "🌱 Growing" : stats.day_length_factor > 0.6 ? "🍂 Slowing" : "❄️ Dormant"}
             </span>
@@ -301,7 +445,7 @@ export default function EngineCanvas() {
             </span>
           </div>
 
-          <div className={styles.hudRow}>
+          <div className={`${styles.hudRow} ${tierClassName(waterTier(stats.water_level))}`}>
             <span>💧 Water: {formatPercent(stats.water_level)}</span>
             <button
               type="button"
@@ -316,27 +460,19 @@ export default function EngineCanvas() {
               Auto-water
             </label>
           </div>
-          <div
-            className={
-              stats.nutrient_level < NUTRIENT_WARNING_THRESHOLD ? `${styles.hudRow} ${styles.warning}` : styles.hudRow
-            }
-          >
+          <div className={`${styles.hudRow} ${tierClassName(nutrientTier(stats.nutrient_level))}`}>
             <span>🌱 Nutrient: {formatNutrient(stats.nutrient_level)}</span>
             <button type="button" onClick={handleFertilize} className={styles.actionButton} disabled={isDead}>
               Fertilize
             </button>
           </div>
-          <div className={styles.hudRow}>
+          <div className={`${styles.hudRow} ${tierClassName(humidityTier(stats.humidity_level))}`}>
             <span>💨 Humidity: {formatPercent(stats.humidity_level)}</span>
             <button type="button" onClick={handleMist} className={styles.actionButton} disabled={isDead}>
               Mist
             </button>
           </div>
-          <div
-            className={
-              stats.root_health < ROOT_HEALTH_WARNING_THRESHOLD ? `${styles.hudRow} ${styles.warning}` : styles.hudRow
-            }
-          >
+          <div className={`${styles.hudRow} ${tierClassName(rootHealthTier(stats.root_health))}`}>
             <span title="Drops from sustained overwatering or over-fertilizing — a damaged root system can wilt even when the soil reads fully watered">
               🪴 Root health: {formatPercent(stats.root_health)}
             </span>
@@ -344,11 +480,7 @@ export default function EngineCanvas() {
               Repot
             </button>
           </div>
-          <div
-            className={
-              stats.pest_infestation > PEST_WARNING_THRESHOLD ? `${styles.hudRow} ${styles.warning}` : styles.hudRow
-            }
-          >
+          <div className={`${styles.hudRow} ${tierClassName(pestTier(stats.pest_infestation))}`}>
             <span title="Spider mites — thrive in dry air, suppressed by misting">
               🐛 Pests: {formatPercent(stats.pest_infestation)}
             </span>
