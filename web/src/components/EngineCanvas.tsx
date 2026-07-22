@@ -37,6 +37,7 @@ interface EngineStats {
   height: number;
   leaf_count: number;
   branch_count: number;
+  stem_segment_count: number;
   water_level: number;
   temperature_c: number;
   nutrient_level: number;
@@ -45,6 +46,8 @@ interface EngineStats {
   pest_infestation: number;
   day_length_factor: number;
   pot_position: number;
+  auto_water_enabled: boolean;
+  realistic_scale: boolean;
   death_cause: string;
   season: string;
   days_elapsed: number;
@@ -67,21 +70,23 @@ interface EngineSimulation {
   set_pot_position(position: number): void;
   set_time_scale(multiplier: number): void;
   set_auto_water(enabled: boolean): void;
-  set_species(species: string): void;
+  set_species(species: string, realisticScale: boolean): void;
   restart(): void;
   set_pointer_position(x: number, y: number): void;
   clear_pointer_position(): void;
+  pan_camera(dx: number, dy: number): void;
+  reset_camera_pan(): void;
   has_hover_target(): boolean;
   prune_hovered(): boolean;
-  stats(): EngineStats;
+  stats(): EngineStats | undefined;
+  set_active_tool(tool: string): void;
   plant_count(): number;
   plant_species(index: number): string;
   selected_plant_index(): number;
   set_selected_plant(index: number): void;
-  add_plant(species: string): boolean;
   inventory_count(): number;
   inventory_species(index: number): string;
-  plant_cutting(index: number): boolean;
+  plant_cutting(index: number, realisticScale: boolean): boolean;
   free(): void;
 }
 
@@ -113,6 +118,10 @@ type Status = "loading" | "ready" | "error";
 // loop's own per-frame pace, since nothing here needs to be read that
 // often for a human to watch it change.
 const STATS_POLL_MS = 250;
+// Total pointer travel (CSS px) before a press-and-move gesture counts as a
+// drag-to-pan rather than a click/tap-to-prune — small enough to feel
+// immediate, large enough that a slightly wobbly tap still prunes.
+const DRAG_THRESHOLD_PX = 4;
 const WATER_DOSE = 0.5;
 const FERTILIZE_DOSE = 0.3;
 const MIST_DOSE = 0.3;
@@ -176,14 +185,25 @@ function canvasRelativePosition(canvas: HTMLCanvasElement, clientX: number, clie
 export default function EngineCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simRef = useRef<EngineSimulation | null>(null);
+  // Drag-to-pan gesture state — see `handlePointerMove`/`handleClick` in
+  // the effect below. Plain refs, not state: this updates every pointer
+  // event, far too often to justify a re-render.
+  const dragRef = useRef<{ lastX: number; lastY: number; totalDistance: number; didPan: boolean } | null>(null);
+  const didPanRef = useRef(false);
   const [status, setStatus] = useState<Status>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [stats, setStats] = useState<EngineStats | null>(null);
   const [timeScale, setTimeScale] = useState(DEFAULT_TIME_SCALE);
+  // Optimistic local mirror of the *selected* plant's own `Stats::
+  // auto_water_enabled` — set immediately on toggle for a responsive
+  // checkbox, then resynced from `stats` every poll (like `potPosition`
+  // below) so switching plants shows that plant's own real setting.
   const [autoWater, setAutoWater] = useState(false);
   const [species, setSpecies] = useState(DEFAULT_SPECIES);
   const [potPosition, setPotPosition] = useState(0);
   const [showSeedInfo, setShowSeedInfo] = useState(false);
+  const [activeTool, setActiveTool] = useState<"prune" | "trim">("prune");
+  const [showSettings, setShowSettings] = useState(false);
   // One entry per plant currently in the room, its own species name (see
   // `Simulation::plant_species`) — index lines up with `set_selected_
   // plant`'s own `index` param. Refreshed every poll alongside `stats`,
@@ -191,12 +211,8 @@ export default function EngineCanvas() {
   // elsewhere always shows the room's real current state.
   const [plantTabs, setPlantTabs] = useState<string[]>([]);
   const [selectedPlantIndex, setSelectedPlantIndex] = useState(0);
-  // Which species a new plant (`handleAddPlant`) should grow as — separate
-  // from the HUD's own `species` selector above, which instead *changes*
-  // the currently-selected plant's species (a destructive reset — see
-  // `handleSpeciesChange`). Conflating the two would mean picking a species
-  // to grow a second plant with also nukes whichever plant is selected.
   const [newPlantSpecies, setNewPlantSpecies] = useState(DEFAULT_SPECIES);
+  const [newPlantRealisticScale, setNewPlantRealisticScale] = useState(false);
   // One entry per stem cutting waiting to be planted (see `Simulation::
   // take_cutting`/`plant_cutting`), its own species name.
   const [inventory, setInventory] = useState<string[]>([]);
@@ -268,6 +284,37 @@ export default function EngineCanvas() {
       if (!canvas || !simRef.current) return;
       const { x, y } = canvasRelativePosition(canvas, event.clientX, event.clientY);
       simRef.current.set_pointer_position(x, y);
+
+      // Dragging the background pans the room's view (see `Simulation::
+      // pan_camera`) — `event.buttons !== 0` covers both a held mouse
+      // button and an in-contact touch/pen, so mouse and touch drag the
+      // same way. Below `DRAG_THRESHOLD_PX` of total movement, this stays
+      // a plain click/tap (see `handleClick`) rather than a pan, so a
+      // static tap still prunes.
+      const drag = dragRef.current;
+      if (drag && event.buttons !== 0) {
+        const dx = event.clientX - drag.lastX;
+        const dy = event.clientY - drag.lastY;
+        drag.totalDistance += Math.hypot(dx, dy);
+        drag.lastX = event.clientX;
+        drag.lastY = event.clientY;
+        if (drag.totalDistance > DRAG_THRESHOLD_PX) {
+          drag.didPan = true;
+          simRef.current.pan_camera(dx, dy);
+        }
+      }
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      dragRef.current = { lastX: event.clientX, lastY: event.clientY, totalDistance: 0, didPan: false };
+    }
+
+    function handlePointerUpOrCancel() {
+      // `click` fires after `pointerup`, so whether this gesture panned has
+      // to survive into a ref `handleClick` can still read once `dragRef`
+      // itself is cleared below.
+      didPanRef.current = dragRef.current?.didPan ?? false;
+      dragRef.current = null;
     }
 
     function handlePointerLeave() {
@@ -275,21 +322,45 @@ export default function EngineCanvas() {
     }
 
     function handleClick() {
+      // A drag that actually panned shouldn't also prune whatever's under
+      // the pointer where it happened to end up — `dragRef` is already
+      // cleared by pointerup by the time `click` fires, so the pan
+      // decision is captured here instead, at the end of the gesture that
+      // set it.
+      if (didPanRef.current) {
+        didPanRef.current = false;
+        return;
+      }
       simRef.current?.prune_hovered();
+    }
+
+    // Recenters a dragged-away view — double-click/double-tap is a common
+    // enough "reset this" convention (maps, image viewers) to need no
+    // extra on-screen control for it.
+    function handleDoubleClick() {
+      simRef.current?.reset_camera_pan();
     }
 
     load();
     window.addEventListener("resize", handleResize);
     const canvasEl = canvasRef.current;
     canvasEl?.addEventListener("pointermove", handlePointerMove);
+    canvasEl?.addEventListener("pointerdown", handlePointerDown);
+    canvasEl?.addEventListener("pointerup", handlePointerUpOrCancel);
+    canvasEl?.addEventListener("pointercancel", handlePointerUpOrCancel);
     canvasEl?.addEventListener("pointerleave", handlePointerLeave);
     canvasEl?.addEventListener("click", handleClick);
+    canvasEl?.addEventListener("dblclick", handleDoubleClick);
     return () => {
       cancelled = true;
       window.removeEventListener("resize", handleResize);
       canvasEl?.removeEventListener("pointermove", handlePointerMove);
+      canvasEl?.removeEventListener("pointerdown", handlePointerDown);
+      canvasEl?.removeEventListener("pointerup", handlePointerUpOrCancel);
+      canvasEl?.removeEventListener("pointercancel", handlePointerUpOrCancel);
       canvasEl?.removeEventListener("pointerleave", handlePointerLeave);
       canvasEl?.removeEventListener("click", handleClick);
+      canvasEl?.removeEventListener("dblclick", handleDoubleClick);
       simRef.current?.stop();
       simRef.current?.free();
       simRef.current = null;
@@ -305,7 +376,7 @@ export default function EngineCanvas() {
       const sim = simRef.current;
       if (!sim) return;
       const currentStats = sim.stats();
-      setStats(currentStats);
+      setStats(currentStats ?? null);
       // A pointer cursor over a hover-picked leaf or stem segment is the
       // only affordance that the prune tool is about to do something on
       // click — set directly on the element (not React state) since this
@@ -329,7 +400,10 @@ export default function EngineCanvas() {
       // showing *this* plant's real state rather than whatever was left
       // over from a previously-selected plant.
       if (tabs[selected]) setSpecies(tabs[selected]);
-      setPotPosition(currentStats.pot_position);
+      if (currentStats) {
+        setPotPosition(currentStats.pot_position);
+        setAutoWater(currentStats.auto_water_enabled);
+      }
 
       const inventoryCount = sim.inventory_count();
       const items: string[] = [];
@@ -340,6 +414,12 @@ export default function EngineCanvas() {
   }, [status]);
 
   const isDead = stats?.stage === "Dead";
+  const inventoryCounts = inventory.reduce<Record<string, number>>((acc, s) => {
+    acc[s] = (acc[s] ?? 0) + 1;
+    return acc;
+  }, {});
+  const availableSpecies = Object.keys(inventoryCounts);
+  const effectiveNewPlantSpecies = availableSpecies.includes(newPlantSpecies) ? newPlantSpecies : availableSpecies[0];
 
   function handleWater() {
     simRef.current?.water(WATER_DOSE);
@@ -400,15 +480,21 @@ export default function EngineCanvas() {
     simRef.current?.set_auto_water(enabled);
   }
 
+  function handleToolChange(tool: "prune" | "trim") {
+    setActiveTool(tool);
+    simRef.current?.set_active_tool(tool);
+  }
+
   function handleSpeciesChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const next = e.target.value;
+    const realisticScale = stats?.realistic_scale ?? false;
     setSpecies(next);
     // Switching species starts a fresh plant/soil under the new habit (see
     // Simulation::set_species) — the old stats snapshot no longer describes
     // anything that still exists, so clear it rather than show one stale
     // frame of the previous plant's numbers next to the new one's zeros.
     setStats(null);
-    simRef.current?.set_species(next);
+    simRef.current?.set_species(next, realisticScale);
   }
 
   // Switches which plant the HUD/actions target — every plant in the room
@@ -422,22 +508,10 @@ export default function EngineCanvas() {
     setStats(null);
   }
 
-  // Grows a brand-new plant in its own pot along the windowsill (see
-  // `Simulation::add_plant`/`scene::plant_slot_base_anchor`) — under
-  // `newPlantSpecies`, not the HUD's own `species` selector (that one
-  // instead resets whichever plant is *currently selected* — conflating
-  // the two would mean picking a species for a new plant also nukes the
-  // one you're looking at). A no-op past `MAX_PLANTS`; the room's plant
-  // count updates on the next poll regardless.
-  function handleAddPlant() {
-    simRef.current?.add_plant(newPlantSpecies);
-  }
-
-  // Spends one inventory cutting to grow it into its own new plant (see
-  // `Simulation::plant_cutting`) — selects that new plant on success, same
-  // as `add_plant`, so the HUD immediately shows what was just planted.
-  function handlePlantCutting(index: number) {
-    const planted = simRef.current?.plant_cutting(index);
+  function handlePlantFromInventory(species: string) {
+    const index = inventory.indexOf(species);
+    if (index === -1) return;
+    const planted = simRef.current?.plant_cutting(index, newPlantRealisticScale);
     if (planted) setStats(null);
   }
 
@@ -469,12 +543,7 @@ export default function EngineCanvas() {
           </button>
         </div>
       )}
-      {stats && (
-        <div className={styles.toolTag} title="The only tool for now — hover a leaf and click to remove it">
-          🔪 Prune <em>(active)</em>
-        </div>
-      )}
-      {stats && (
+      {status === "ready" && (
         <div className={styles.plantSelectorBar}>
           {plantTabs.map((tabSpecies, index) => (
             <button
@@ -488,26 +557,62 @@ export default function EngineCanvas() {
               {index + 1}
             </button>
           ))}
-          <select
-            aria-label="New plant species"
-            value={newPlantSpecies}
-            onChange={(e) => setNewPlantSpecies(e.target.value)}
-            className={styles.speciesSelect}
-          >
-            {SPECIES_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={handleAddPlant}
-            className={styles.plantTab}
-            title="Add a new plant to the room"
-          >
-            + Add
-          </button>
+          {availableSpecies.length > 0 && (
+            <>
+              <select
+                aria-label="New plant species"
+                value={effectiveNewPlantSpecies}
+                onChange={(e) => setNewPlantSpecies(e.target.value)}
+                className={styles.speciesSelect}
+              >
+                {availableSpecies.map((s) => (
+                  <option key={s} value={s}>
+                    {speciesLabel(s)} x{inventoryCounts[s]}
+                  </option>
+                ))}
+              </select>
+              <label className={styles.realisticScaleLabel} title="Cap growth near a real houseplant's mature size instead of growing indefinitely">
+                <input
+                  type="checkbox"
+                  checked={newPlantRealisticScale}
+                  onChange={(e) => setNewPlantRealisticScale(e.target.checked)}
+                />
+                Realistic scale
+              </label>
+              <button
+                type="button"
+                onClick={() => handlePlantFromInventory(effectiveNewPlantSpecies)}
+                className={styles.plantTab}
+                title="Plant one from your inventory"
+              >
+                Add plant
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {stats && (stats.leaf_count > 0 || stats.stem_segment_count > 0) && (
+        <div className={styles.toolTag}>
+          {stats.leaf_count > 0 && (
+            <button
+              type="button"
+              onClick={() => handleToolChange("prune")}
+              className={`${styles.toolButton} ${activeTool === "prune" ? styles.toolButtonActive : ""}`}
+              title="Hover a leaf and click to remove it"
+            >
+              🔪 Prune
+            </button>
+          )}
+          {stats.stem_segment_count > 0 && (
+            <button
+              type="button"
+              onClick={() => handleToolChange("trim")}
+              className={`${styles.toolButton} ${activeTool === "trim" ? styles.toolButtonActive : ""}`}
+              title="Hover the stem and click to cut it at that point"
+            >
+              ✂️ Trim
+            </button>
+          )}
         </div>
       )}
       {stats && (
@@ -542,152 +647,145 @@ export default function EngineCanvas() {
         </div>
       )}
       {stats && (
-        <div className={styles.hud}>
-          <div className={styles.hudRow}>
-            <label htmlFor="species">Species:</label>
-            <select id="species" value={species} onChange={handleSpeciesChange} className={styles.speciesSelect}>
-              {SPECIES_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className={styles.hudRow}>
-            <span>
-              {stats.stage} · {stats.is_daytime ? "☀️" : "🌙"} {formatTimeOfDay(stats.day_progress)}
-            </span>
-            <span className={tierClassName(temperatureTier(stats.temperature_c))}>
-              🌡️ {formatTemperature(stats.temperature_c)}
-            </span>
-            <span title="How much winter's shorter days are slowing growth right now">
-              {stats.day_length_factor > 0.85 ? "🌱 Growing" : stats.day_length_factor > 0.6 ? "🍂 Slowing" : "❄️ Dormant"}
-            </span>
-          </div>
-          <div className={styles.hudRow}>
-            <span>Height: {formatHeight(stats.height)}</span>
-            <span>
-              Leaves: {stats.leaf_count} · Branches: {stats.branch_count}
-            </span>
-          </div>
+        <div className={styles.hudContainer}>
+          <button
+            type="button"
+            className={styles.settingsToggle}
+            onClick={() => setShowSettings((shown) => !shown)}
+            aria-expanded={showSettings}
+          >
+            ⚙️ Settings
+          </button>
+          <div className={`${styles.hud} ${showSettings ? styles.hudOpen : ""}`}>
+              <div className={styles.hudRow}>
+                <label htmlFor="species">Species:</label>
+                <select id="species" value={species} onChange={handleSpeciesChange} className={styles.speciesSelect}>
+                  {SPECIES_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className={styles.hudRow}>
+                <span>{stats.realistic_scale ? "🌿 realistic" : "🌳 gigantic"}</span>
+              </div>
+              <div className={styles.hudRow}>
+                <span>
+                  {stats.stage} · {stats.is_daytime ? "☀️" : "🌙"} {formatTimeOfDay(stats.day_progress)}
+                </span>
+                <span className={tierClassName(temperatureTier(stats.temperature_c))}>
+                  🌡️ {formatTemperature(stats.temperature_c)}
+                </span>
+                <span title="How much winter's shorter days are slowing growth right now">
+                  {stats.day_length_factor > 0.85 ? "🌱 Growing" : stats.day_length_factor > 0.6 ? "🍂 Slowing" : "❄️ Dormant"}
+                </span>
+              </div>
+              <div className={styles.hudRow}>
+                <span>Height: {formatHeight(stats.height)}</span>
+                <span>
+                  Leaves: {stats.leaf_count} · Branches: {stats.branch_count}
+                </span>
+              </div>
 
-          <div className={`${styles.hudRow} ${tierClassName(waterTier(stats.water_level))}`}>
-            <span>💧 Water: {formatPercent(stats.water_level)}</span>
-            <button
-              type="button"
-              onClick={handleWater}
-              className={styles.actionButton}
-              disabled={autoWater || isDead}
-            >
-              Water
-            </button>
-            <label className={styles.autoWaterLabel}>
-              <input type="checkbox" checked={autoWater} onChange={handleAutoWaterToggle} disabled={isDead} />
-              Auto-water
-            </label>
-          </div>
-          <div className={`${styles.hudRow} ${tierClassName(nutrientTier(stats.nutrient_level))}`}>
-            <span>🌱 Nutrient: {formatNutrient(stats.nutrient_level)}</span>
-            <button type="button" onClick={handleFertilize} className={styles.actionButton} disabled={isDead}>
-              Fertilize
-            </button>
-          </div>
-          <div className={`${styles.hudRow} ${tierClassName(humidityTier(stats.humidity_level))}`}>
-            <span>💨 Humidity: {formatPercent(stats.humidity_level)}</span>
-            <button type="button" onClick={handleMist} className={styles.actionButton} disabled={isDead}>
-              Mist
-            </button>
-          </div>
-          <div className={`${styles.hudRow} ${tierClassName(rootHealthTier(stats.root_health))}`}>
-            <span title="Drops from sustained overwatering or over-fertilizing — a damaged root system can wilt even when the soil reads fully watered">
-              🪴 Root health: {formatPercent(stats.root_health)}
-            </span>
-            <button type="button" onClick={handleRepot} className={styles.actionButton} disabled={isDead}>
-              Repot
-            </button>
-          </div>
-          <div className={`${styles.hudRow} ${tierClassName(pestTier(stats.pest_infestation))}`}>
-            <span title="Spider mites — thrive in dry air, suppressed by misting">
-              🐛 Pests: {formatPercent(stats.pest_infestation)}
-            </span>
-            <button
-              type="button"
-              onClick={handleTreatPests}
-              className={styles.actionButton}
-              disabled={isDead || stats.pest_infestation <= 0}
-            >
-              Treat
-            </button>
-          </div>
+              <div className={`${styles.hudRow} ${tierClassName(waterTier(stats.water_level))}`}>
+                <span>💧 Water: {formatPercent(stats.water_level)}</span>
+                <button
+                  type="button"
+                  onClick={handleWater}
+                  className={styles.actionButton}
+                  disabled={autoWater || isDead}
+                >
+                  Water
+                </button>
+                <label className={styles.autoWaterLabel}>
+                  <input type="checkbox" checked={autoWater} onChange={handleAutoWaterToggle} disabled={isDead} />
+                  Auto-water
+                </label>
+              </div>
+              <div className={`${styles.hudRow} ${tierClassName(nutrientTier(stats.nutrient_level))}`}>
+                <span>🌱 Nutrient: {formatNutrient(stats.nutrient_level)}</span>
+                <button type="button" onClick={handleFertilize} className={styles.actionButton} disabled={isDead}>
+                  Fertilize
+                </button>
+              </div>
+              <div className={`${styles.hudRow} ${tierClassName(humidityTier(stats.humidity_level))}`}>
+                <span>💨 Humidity: {formatPercent(stats.humidity_level)}</span>
+                <button type="button" onClick={handleMist} className={styles.actionButton} disabled={isDead}>
+                  Mist
+                </button>
+              </div>
+              <div className={`${styles.hudRow} ${tierClassName(rootHealthTier(stats.root_health))}`}>
+                <span title="Drops from sustained overwatering or over-fertilizing — a damaged root system can wilt even when the soil reads fully watered">
+                  🪴 Root health: {formatPercent(stats.root_health)}
+                </span>
+                <button type="button" onClick={handleRepot} className={styles.actionButton} disabled={isDead}>
+                  Repot
+                </button>
+              </div>
+              <div className={`${styles.hudRow} ${tierClassName(pestTier(stats.pest_infestation))}`}>
+                <span title="Spider mites — thrive in dry air, suppressed by misting">
+                  🐛 Pests: {formatPercent(stats.pest_infestation)}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleTreatPests}
+                  className={styles.actionButton}
+                  disabled={isDead || stats.pest_infestation <= 0}
+                >
+                  Treat
+                </button>
+              </div>
 
-          <div className={styles.hudRow}>
-            <label htmlFor="pot-position" title="Closer to the window means more light but a colder night draft; farther back is dimmer but climate-stable">
-              🪟 Pot placement:
-            </label>
-            <input
-              id="pot-position"
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={potPosition}
-              onChange={handlePotPositionChange}
-              className={styles.timeScaleSlider}
-              disabled={isDead}
-            />
-            <span>{potPosition < 0.34 ? "At window" : potPosition < 0.67 ? "Nearby" : "Across room"}</span>
-          </div>
+              <div className={styles.hudRow}>
+                <label htmlFor="pot-position" title="Closer to the window means more light but a colder night draft; farther back is dimmer but climate-stable">
+                  🪟 Pot placement:
+                </label>
+                <input
+                  id="pot-position"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={potPosition}
+                  onChange={handlePotPositionChange}
+                  className={styles.timeScaleSlider}
+                  disabled={isDead}
+                />
+                <span>{potPosition < 0.34 ? "At window" : potPosition < 0.67 ? "Nearby" : "Across room"}</span>
+              </div>
 
-          <div className={styles.hudRow}>
-            <button type="button" onClick={handlePruneMainStem} className={styles.actionButton} disabled={isDead}>
-              Prune stem
-            </button>
-            <button
-              type="button"
-              onClick={handlePruneBranch}
-              className={styles.actionButton}
-              disabled={isDead || stats.branch_count <= 0}
-            >
-              Prune branch
-            </button>
-            <button type="button" onClick={handleTakeCutting} className={styles.actionButton} disabled={isDead}>
-              Take cutting
-            </button>
-          </div>
+              <div className={styles.hudRow}>
+                <button type="button" onClick={handlePruneMainStem} className={styles.actionButton} disabled={isDead}>
+                  Prune stem
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePruneBranch}
+                  className={styles.actionButton}
+                  disabled={isDead || stats.branch_count <= 0}
+                >
+                  Prune branch
+                </button>
+                <button type="button" onClick={handleTakeCutting} className={styles.actionButton} disabled={isDead}>
+                  Take cutting
+                </button>
+              </div>
 
-          <div className={styles.hudRow}>
-            <label htmlFor="time-scale">Speed: {timeScale.toFixed(2)}x</label>
-            <input
-              id="time-scale"
-              type="range"
-              min={0.25}
-              max={5}
-              step={0.25}
-              value={timeScale}
-              onChange={handleTimeScaleChange}
-              className={styles.timeScaleSlider}
-            />
+              <div className={styles.hudRow}>
+                <label htmlFor="time-scale">Speed: {timeScale.toFixed(2)}x</label>
+                <input
+                  id="time-scale"
+                  type="range"
+                  min={0.25}
+                  max={5}
+                  step={0.25}
+                  value={timeScale}
+                  onChange={handleTimeScaleChange}
+                  className={styles.timeScaleSlider}
+                />
+              </div>
           </div>
-        </div>
-      )}
-      {stats && inventory.length > 0 && (
-        <div className={styles.inventoryPanel}>
-          <div className={styles.inventoryTitle}>🧺 Cuttings</div>
-          {inventory.map((itemSpecies, index) => (
-            <div key={index} className={styles.inventoryRow}>
-              <span>
-                {SPECIES_ICONS[itemSpecies] ?? "🌿"} {speciesLabel(itemSpecies)}
-              </span>
-              <button
-                type="button"
-                onClick={() => handlePlantCutting(index)}
-                className={styles.actionButton}
-                title="Grow this cutting into its own new plant"
-              >
-                Plant
-              </button>
-            </div>
-          ))}
         </div>
       )}
     </div>

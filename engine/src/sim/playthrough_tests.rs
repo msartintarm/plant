@@ -263,6 +263,57 @@ fn peace_lily_never_branches_over_a_long_auto_watered_session() {
 }
 
 #[test]
+fn peace_lily_can_actually_take_a_cutting_within_a_reasonable_session() {
+    let mut config = GrowthConfig::default();
+    config.plant = PlantConfig::peace_lily();
+    let mut plant = Plant::new();
+    let mut soil = Soil::new(&config.soil);
+    play(&mut plant, &mut soil, &config, 10.0 * 60.0, None, 0.0, true);
+
+    assert!(
+        plant.height >= config.plant.cutting_min_height,
+        "expected a peace lily's own cutting threshold to be reachable within a normal session, got height {} vs threshold {}",
+        plant.height,
+        config.plant.cutting_min_height
+    );
+    assert!(plant.take_cutting(&config.plant), "expected take_cutting to actually succeed once past its own threshold");
+}
+
+#[test]
+fn dracaena_can_actually_take_a_cutting_within_a_reasonable_session() {
+    let mut config = GrowthConfig::default();
+    config.plant = PlantConfig::dracaena();
+    let mut plant = Plant::new();
+    let mut soil = Soil::new(&config.soil);
+    play(&mut plant, &mut soil, &config, 60.0, None, 0.0, true);
+
+    assert!(
+        plant.height >= config.plant.cutting_min_height,
+        "expected dracaena's own cutting threshold to be reachable within a normal session, got height {} vs threshold {}",
+        plant.height,
+        config.plant.cutting_min_height
+    );
+    assert!(plant.take_cutting(&config.plant), "expected take_cutting to actually succeed once past its own threshold");
+}
+
+#[test]
+fn pothos_can_actually_take_a_cutting_within_a_reasonable_session() {
+    let mut config = GrowthConfig::default();
+    config.plant = PlantConfig::pothos();
+    let mut plant = Plant::new();
+    let mut soil = Soil::new(&config.soil);
+    play(&mut plant, &mut soil, &config, 60.0, None, 0.0, true);
+
+    assert!(
+        plant.height >= config.plant.cutting_min_height,
+        "expected pothos's own cutting threshold to be reachable within a normal session, got height {} vs threshold {}",
+        plant.height,
+        config.plant.cutting_min_height
+    );
+    assert!(plant.take_cutting(&config.plant), "expected take_cutting to actually succeed once past its own threshold");
+}
+
+#[test]
 fn peace_lily_stays_much_shorter_than_dracaena_but_still_grows_plenty_of_leaves() {
     // The whole point of scaling `base_elongation_rate` and
     // `plastochron_height_interval` down by the same factor (see
@@ -438,3 +489,4 @@ fn a_plant_that_permanently_outgrows_its_light_source_eventually_dies_rather_tha
     assert_eq!(plant.stage, Stage::Dead);
     assert_eq!(plant.death_cause, Some(super::plant::DeathCause::Starvation));
 }
+

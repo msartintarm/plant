@@ -705,6 +705,12 @@ pub struct Plant {
     /// exactly once at the tick `stage` becomes `Stage::Dead` and never
     /// cleared afterward. See `DeathCause`.
     pub death_cause: Option<DeathCause>,
+    /// Chosen once, at germination — eases elongation toward zero as
+    /// height/branch-length approach `PlantConfig::realistic_max_height`
+    /// (see `realistic_scale_taper`) instead of today's default unbounded
+    /// growth, which otherwise never truly stops (`height_light_factor`
+    /// bottoms out at a nonzero floor, not zero).
+    pub realistic_scale: bool,
 }
 
 impl Default for Plant {
@@ -738,13 +744,31 @@ impl Default for Plant {
             starvation_timer: 0.0,
             total_time: 0.0,
             death_cause: None,
+            realistic_scale: false,
         }
     }
+}
+
+/// Eases elongation toward zero as `height` nears `max_height` — 1.0 well
+/// below it, 0.0 at/past it. See `Plant::realistic_scale`.
+fn realistic_scale_taper(height: f64, max_height: f64) -> f64 {
+    if max_height <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - height / max_height).clamp(0.0, 1.0)
 }
 
 impl Plant {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the realistic-scale choice at creation (see `realistic_scale`'s
+    /// own doc comment) — a builder method, not a struct literal, since
+    /// most of this struct's fields are private to this module.
+    pub fn with_realistic_scale(mut self, enabled: bool) -> Self {
+        self.realistic_scale = enabled;
+        self
     }
 
     /// Total sim-seconds this plant has been stepped — the only input
@@ -1224,6 +1248,9 @@ impl Plant {
             let affordable_fraction = (self.carbon_pool / desired_cost).min(1.0);
             elongation_carbon_limited = affordable_fraction < 1.0;
             elongation = desired_elongation * affordable_fraction;
+            if self.realistic_scale {
+                elongation *= realistic_scale_taper(self.height, plant.realistic_max_height);
+            }
             self.height += elongation;
             self.carbon_pool -= desired_cost * affordable_fraction;
         }
@@ -1455,7 +1482,11 @@ impl Plant {
         let desired_cost = desired_elongation * plant.elongation_carbon_cost;
         if desired_cost > 0.0 {
             let affordable_fraction = (self.carbon_pool / desired_cost).min(1.0);
-            self.branches[index].height += desired_elongation * affordable_fraction;
+            let mut branch_elongation = desired_elongation * affordable_fraction;
+            if self.realistic_scale {
+                branch_elongation *= realistic_scale_taper(self.branches[index].height, plant.realistic_max_height);
+            }
+            self.branches[index].height += branch_elongation;
             self.carbon_pool -= desired_cost * affordable_fraction;
         }
 
@@ -1802,6 +1833,66 @@ mod tests {
             age: 0.0,
             senescence: 0.0,
         }
+    }
+
+    #[test]
+    fn realistic_scale_taper_is_full_strength_well_below_the_cap_and_zero_at_or_past_it() {
+        assert_eq!(realistic_scale_taper(0.0, 5.0), 1.0);
+        assert!(realistic_scale_taper(2.5, 5.0) < 1.0);
+        assert!(realistic_scale_taper(2.5, 5.0) > 0.0);
+        assert_eq!(realistic_scale_taper(5.0, 5.0), 0.0);
+        assert_eq!(realistic_scale_taper(6.0, 5.0), 0.0, "shouldn't go negative past the cap");
+    }
+
+    #[test]
+    fn realistic_scale_plateaus_near_the_configured_cap_over_a_long_session() {
+        let config = config();
+        let mut plant = Plant {
+            stage: Stage::Vegetative,
+            leaves: vec![mature_leaf(Side::Left)],
+            realistic_scale: true,
+            ..Plant::new()
+        };
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let sun = noon(&config);
+        for _ in 0..200_000 {
+            plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+            soil.moisture = 1.0;
+        }
+        let cap = config.plant.realistic_max_height;
+        assert!(
+            plant.height <= cap + 1e-6,
+            "expected height to stay at/under the realistic cap {cap}, got {}",
+            plant.height
+        );
+        assert!(
+            plant.height > cap * 0.8,
+            "expected height to have actually approached the cap {cap}, not stalled early, got {}",
+            plant.height
+        );
+    }
+
+    #[test]
+    fn unbounded_scale_keeps_growing_well_past_where_realistic_scale_would_have_capped() {
+        let config = config();
+        let mut plant = Plant {
+            stage: Stage::Vegetative,
+            leaves: vec![mature_leaf(Side::Left)],
+            realistic_scale: false,
+            ..Plant::new()
+        };
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let sun = noon(&config);
+        for _ in 0..200_000 {
+            plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+            soil.moisture = 1.0;
+        }
+        assert!(
+            plant.height > config.plant.realistic_max_height,
+            "expected today's default unbounded growth to exceed the realistic cap {} over a long session, got {}",
+            config.plant.realistic_max_height,
+            plant.height
+        );
     }
 
     #[test]

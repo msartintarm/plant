@@ -11,6 +11,9 @@
   display: block;
   background: #0b1220;
   border-radius: 8px;
+  /* Drag-to-pan (see EngineCanvas.tsx's pointer handlers) needs raw touch
+     moves, not the browser's own default scroll/pan gesture on them. */
+  touch-action: none;
 }
 
 .status {
@@ -38,11 +41,43 @@
   opacity: 0.8;
 }
 
-.hud {
+/* Positions the settings toggle + the collapsible .hud panel together —
+   .hud itself is a normal flow child now (see the toggle button below),
+   not independently absolute-positioned, so hiding it doesn't leave a gap. */
+.hudContainer {
   position: absolute;
   left: 0.75rem;
   bottom: 0.75rem;
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  max-width: calc(100% - 1.5rem);
+  max-height: calc(100% - 1.5rem);
+}
+
+/* Collapsed by default on narrow viewports (see EngineCanvas.tsx) — the
+   settings panel is the single biggest thing on screen otherwise, easily
+   covering most of a phone-sized canvas. Same toggle-chip look as
+   .seedTag, so it reads as the same kind of control. */
+.settingsToggle {
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(15, 15, 20, 0.55);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e2e8f0;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.settingsToggle:hover {
+  background: rgba(15, 15, 20, 0.7);
+}
+
+.hud {
+  display: none;
   flex-direction: column;
   gap: 0.35rem;
   padding: 0.6rem 0.75rem;
@@ -53,6 +88,32 @@
   font-family: ui-monospace, monospace;
   font-size: 0.8rem;
   line-height: 1.4;
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.hud.hudOpen {
+  display: flex;
+}
+
+/* Tighter everywhere the panel is most likely to overrun the canvas —
+   narrow phones, and any short/landscape-phone viewport regardless of
+   width. */
+@media (max-width: 480px), (max-height: 480px) {
+  .hud {
+    gap: 0.2rem;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.7rem;
+  }
+
+  .hudRow {
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .timeScaleSlider {
+    width: 90px;
+  }
 }
 
 .hudRow {
@@ -198,18 +259,16 @@
   font-size: 1.1rem;
 }
 
-/* The currently-selected tool — top-left per its own design, distinct from
-   the season plaque's top-right "world state" placement. Prune is the only
-   tool for now (always active), but this is a tag, not a toggle, so a
-   second tool later just becomes another option here rather than a
-   layout change. */
 .toolTag {
   position: absolute;
-  top: 0.75rem;
+  top: 2.5rem;
   left: 0.75rem;
   display: flex;
   align-items: center;
   gap: 0.35rem;
+}
+
+.toolButton {
   padding: 0.3rem 0.6rem;
   border-radius: 4px;
   background: rgba(15, 15, 20, 0.55);
@@ -218,6 +277,17 @@
   color: #e2e8f0;
   font-family: ui-monospace, monospace;
   font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.toolButton:hover {
+  background: rgba(15, 15, 20, 0.75);
+}
+
+.toolButtonActive {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.25);
+  color: #7dd3fc;
 }
 
 /* The seed-info toggle — sits below the season plaque in the shared
@@ -261,7 +331,8 @@
   white-space: nowrap;
 }
 
-.autoWaterLabel {
+.autoWaterLabel,
+.realisticScaleLabel {
   display: flex;
   align-items: center;
   gap: 0.3rem;
@@ -283,11 +354,9 @@
   width: 120px;
 }
 
-/* Below the .toolTag (top-left) — one small tab per plant currently in the
-   room, plus a species picker + "+ Add" button to grow another. */
 .plantSelectorBar {
   position: absolute;
-  top: 2.5rem;
+  top: 0.75rem;
   left: 0.75rem;
   display: flex;
   align-items: center;
@@ -318,32 +387,3 @@
   color: #7dd3fc;
 }
 
-/* Bottom-right, mirroring the .hud's own bottom-left placement — stem
-   cuttings taken (see Simulation::take_cutting) but not yet planted. */
-.inventoryPanel {
-  position: absolute;
-  right: 0.75rem;
-  bottom: 0.75rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.5rem 0.65rem;
-  border-radius: 8px;
-  background: rgba(15, 15, 20, 0.55);
-  backdrop-filter: blur(4px);
-  color: #e2e8f0;
-  font-family: ui-monospace, monospace;
-  font-size: 0.75rem;
-}
-
-.inventoryTitle {
-  font-weight: 600;
-  opacity: 0.85;
-}
-
-.inventoryRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-}

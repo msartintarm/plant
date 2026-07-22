@@ -63,7 +63,7 @@ pub fn appearance(phase: f64) -> MoonAppearance {
     }
 }
 
-/// The moon's own position across the night — (azimuth, elevation), same
+/// The moon's own position across the sky — (azimuth, elevation), same
 /// 0.0..1.0 conventions `scene::sky_object_transform` already expects from
 /// `SunState`. Deliberately *not* just reusing `sun_state`'s own azimuth/
 /// elevation for the moon: those are only ever meant to be looked at while
@@ -73,16 +73,40 @@ pub fn appearance(phase: f64) -> MoonAppearance {
 /// drawn *at* night using that same held value — the moon would sit frozen
 /// at the sunset-side edge all evening, then instantly snap to the sunrise-
 /// side edge the moment `day_progress` wrapped past midnight. This instead
-/// sweeps smoothly across the whole sunset-to-sunrise span, rising at one
-/// horizon and setting at the other like the sun's own arc does across the
-/// day, with no discontinuity at the day_progress wrap.
-pub fn arc_position(day_progress: f64, sun_config: &SunConfig) -> (f64, f64) {
+/// sweeps smoothly across its own rise-to-set span, with no discontinuity
+/// at the `day_progress` wrap.
+///
+/// Rise/set timing shifts with `phase` (the sun-earth-moon elongation, same
+/// 0..1 convention `appearance` uses) rather than always sitting exactly
+/// opposite the sun: new moon (phase 0) rises/transits/sets alongside the
+/// sun; full moon (0.5) transits at midnight (the old, phase-blind
+/// assumption); quarters transit at sunset/sunrise.
+pub fn arc_position(day_progress: f64, phase: f64, sun_config: &SunConfig) -> (f64, f64) {
     let day_progress = day_progress.rem_euclid(1.0);
-    let night_duration = (1.0 - sun_config.sunset) + sun_config.sunrise;
-    let night_progress = (day_progress - sun_config.sunset).rem_euclid(1.0);
-    let azimuth = (night_progress / night_duration).clamp(0.0, 1.0);
-    let elevation = (PI * azimuth).sin();
+    let moonrise_progress = (sun_config.sunrise + phase).rem_euclid(1.0);
+    let since_moonrise = (day_progress - moonrise_progress).rem_euclid(1.0);
+    let azimuth = (since_moonrise / 0.5).clamp(0.0, 1.0);
+    let elevation = (2.0 * PI * since_moonrise).sin();
     (azimuth, elevation)
+}
+
+/// Bright-limb tilt (radians) for `scene::moon_shadow_transform` — a
+/// stylized approximation (not real parallactic-angle ephemeris math,
+/// since `arc_position`'s azimuth/elevation aren't true equatorial
+/// coordinates either). Bright limb faces the sun's own current position;
+/// the tilt fades to 0 (pure vertical split) toward the poles and to full
+/// strength toward the equator, matching how a real crescent reads more
+/// vertical at high latitude and more "smile"-shaped near the equator.
+pub fn crescent_tilt_angle(
+    moon: (f64, f64),
+    sun: (f64, f64),
+    latitude_degrees: f64,
+) -> f64 {
+    let (moon_azimuth, moon_elevation) = moon;
+    let (sun_azimuth, sun_elevation) = sun;
+    let toward_sun = (sun_elevation - moon_elevation).atan2(sun_azimuth - moon_azimuth);
+    let latitude_factor = 1.0 - (latitude_degrees.to_radians().abs()).sin();
+    toward_sun * latitude_factor
 }
 
 /// Adds the moon's own light to the sun's — a full moon genuinely
@@ -92,9 +116,14 @@ pub fn arc_position(day_progress: f64, sun_config: &SunConfig) -> (f64, f64) {
 /// `arc_position` for the moon's actual on-screen position, a separate
 /// concern from how much light it's contributing to growth) and `color`
 /// stays untouched too, since this is meant as a subtle boost, not a visual
-/// re-tint.
-pub fn apply_moonlight(sun: SunState, appearance: MoonAppearance, config: &MoonConfig) -> SunState {
-    let moonlight = appearance.illuminated_fraction * config.max_light_contribution;
+/// re-tint. `moon_elevation` gates the contribution to 0 when the moon
+/// isn't actually above the horizon (see `arc_position`).
+pub fn apply_moonlight(sun: SunState, appearance: MoonAppearance, moon_elevation: f64, config: &MoonConfig) -> SunState {
+    let moonlight = if moon_elevation > 0.0 {
+        appearance.illuminated_fraction * config.max_light_contribution
+    } else {
+        0.0
+    };
     SunState { intensity: (sun.intensity + moonlight).min(1.0), ..sun }
 }
 
@@ -200,66 +229,106 @@ mod tests {
         assert!(!appearance(0.9).waxing);
     }
 
+    // Full-moon (`phase` 0.5) is the one case where the old, phase-blind
+    // `arc_position` happened to be exactly correct — it's genuinely in
+    // opposition, so it does rise at sunset and set at sunrise every time.
+    // These pin that special case down explicitly now that it's no longer
+    // the *only* case the function models.
+
     #[test]
-    fn arc_position_rises_at_sunset_and_sets_at_sunrise() {
+    fn full_moon_rises_at_sunset_and_sets_at_sunrise() {
         let config = SunConfig::default();
-        let (azimuth_at_sunset, elevation_at_sunset) = arc_position(config.sunset, &config);
+        let (azimuth_at_sunset, elevation_at_sunset) = arc_position(config.sunset, 0.5, &config);
         assert!((azimuth_at_sunset - 0.0).abs() < 1e-9);
         assert!(elevation_at_sunset.abs() < 1e-9, "moonrise should be right at the horizon");
-        let (azimuth_at_sunrise, elevation_at_sunrise) = arc_position(config.sunrise, &config);
+        let (azimuth_at_sunrise, elevation_at_sunrise) = arc_position(config.sunrise, 0.5, &config);
         assert!((azimuth_at_sunrise - 1.0).abs() < 1e-9);
         assert!(elevation_at_sunrise.abs() < 1e-9, "moonset should be right at the horizon");
     }
 
     #[test]
-    fn arc_position_peaks_at_the_middle_of_the_night() {
+    fn full_moon_peaks_at_midnight() {
         let config = SunConfig::default();
         let night_duration = (1.0 - config.sunset) + config.sunrise;
         let midnight_ish = (config.sunset + night_duration / 2.0).rem_euclid(1.0);
-        let (azimuth, elevation) = arc_position(midnight_ish, &config);
+        let (azimuth, elevation) = arc_position(midnight_ish, 0.5, &config);
         assert!((azimuth - 0.5).abs() < 1e-6);
         assert!((elevation - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn arc_position_sweeps_continuously_across_the_day_progress_wrap() {
+    fn full_moon_sits_below_the_horizon_during_the_day() {
+        // opposition to the sun: at its nadir when the sun's at its peak
         let config = SunConfig::default();
-        let just_before_wrap = arc_position(0.999, &config);
-        let just_after_wrap = arc_position(0.001, &config);
+        let (_, elevation) = arc_position(0.5, 0.5, &config);
+        assert!((elevation - -1.0).abs() < 1e-6, "expected the full moon at its nadir at solar noon, got {elevation}");
+    }
+
+    #[test]
+    fn new_moon_is_up_during_the_day_alongside_the_sun_not_at_night() {
+        // conjunction with the sun: reverse of the full-moon case above
+        let config = SunConfig::default();
+        let (_, elevation_at_noon) = arc_position(0.5, 0.0, &config);
+        assert!(elevation_at_noon > 0.9, "expected the new moon near its own peak at solar noon, got {elevation_at_noon}");
+        let midnight = 0.0;
+        let (_, elevation_at_midnight) = arc_position(midnight, 0.0, &config);
+        assert!(elevation_at_midnight < -0.9, "expected the new moon well below the horizon at midnight, got {elevation_at_midnight}");
+    }
+
+    #[test]
+    fn first_quarter_moon_transits_at_sunset_last_quarter_transits_at_sunrise() {
+        let config = SunConfig::default();
+        let (_, elevation_first_quarter_at_sunset) = arc_position(config.sunset, 0.25, &config);
         assert!(
-            (just_after_wrap.0 - just_before_wrap.0).abs() < 0.01,
-            "azimuth should sweep smoothly across midnight, not jump: {just_before_wrap:?} -> {just_after_wrap:?}"
+            (elevation_first_quarter_at_sunset - 1.0).abs() < 1e-6,
+            "expected first quarter moon to peak right at sunset, got {elevation_first_quarter_at_sunset}"
+        );
+        let (_, elevation_last_quarter_at_sunrise) = arc_position(config.sunrise, 0.75, &config);
+        assert!(
+            (elevation_last_quarter_at_sunrise - 1.0).abs() < 1e-6,
+            "expected last quarter moon to peak right at sunrise, got {elevation_last_quarter_at_sunrise}"
         );
     }
 
     #[test]
-    fn arc_position_holds_at_the_horizon_while_the_sun_is_actually_up() {
-        // Daytime `day_progress` values fall outside the sunset..sunrise
-        // night window this arc is meant for — `scene::sky_object_
-        // transform` never actually reads them then (the sun is drawn
-        // instead, see `render`'s elevation check), but the clamp should
-        // still hold sanely rather than producing something nonsensical.
+    fn arc_position_sweeps_continuously_across_the_day_progress_wrap() {
         let config = SunConfig::default();
-        let (azimuth, elevation) = arc_position(0.5, &config);
-        assert_eq!(azimuth, 1.0);
-        assert!(elevation.abs() < 1e-9);
+        for phase in [0.0, 0.25, 0.5, 0.75] {
+            let just_before_wrap = arc_position(0.999, phase, &config);
+            let just_after_wrap = arc_position(0.001, phase, &config);
+            assert!(
+                (just_after_wrap.0 - just_before_wrap.0).abs() < 0.01
+                    || (just_after_wrap.0 - just_before_wrap.0).abs() > 0.99,
+                "azimuth should sweep smoothly across midnight (or wrap cleanly 1.0->0.0), not jump: {just_before_wrap:?} -> {just_after_wrap:?} at phase {phase}"
+            );
+        }
     }
 
     #[test]
-    fn apply_moonlight_adds_more_light_at_full_moon_than_new_moon() {
+    fn apply_moonlight_adds_more_light_at_full_moon_than_new_moon_while_both_are_up() {
         let config = MoonConfig { max_light_contribution: 0.05, ..MoonConfig::default() };
         let dark_sun = SunState { elevation: -0.5, azimuth: 1.0, intensity: 0.0, color: [1.0, 1.0, 1.0] };
-        let new_moon = apply_moonlight(dark_sun, appearance(0.0), &config);
-        let full_moon = apply_moonlight(dark_sun, appearance(0.5), &config);
+        let moon_up = 0.5;
+        let new_moon = apply_moonlight(dark_sun, appearance(0.0), moon_up, &config);
+        let full_moon = apply_moonlight(dark_sun, appearance(0.5), moon_up, &config);
         assert_eq!(new_moon.intensity, 0.0, "a new moon adds no light at all");
         assert!((full_moon.intensity - 0.05).abs() < 1e-9, "a full moon adds the configured maximum");
+    }
+
+    #[test]
+    fn apply_moonlight_contributes_nothing_while_the_moon_is_below_the_horizon() {
+        let config = MoonConfig { max_light_contribution: 0.05, ..MoonConfig::default() };
+        let dark_sun = SunState { elevation: -0.5, azimuth: 1.0, intensity: 0.0, color: [1.0, 1.0, 1.0] };
+        let moon_down = -0.1;
+        let lit = apply_moonlight(dark_sun, appearance(0.5), moon_down, &config);
+        assert_eq!(lit.intensity, 0.0, "a below-horizon moon should contribute no light even at full phase");
     }
 
     #[test]
     fn apply_moonlight_never_pushes_intensity_past_full_daylight() {
         let config = MoonConfig { max_light_contribution: 0.05, ..MoonConfig::default() };
         let bright_sun = SunState { elevation: 1.0, azimuth: 0.5, intensity: 1.0, color: [1.0, 1.0, 1.0] };
-        let lit = apply_moonlight(bright_sun, appearance(0.5), &config);
+        let lit = apply_moonlight(bright_sun, appearance(0.5), 0.5, &config);
         assert_eq!(lit.intensity, 1.0, "moonlight is irrelevant once the sun already provides full intensity");
     }
 
@@ -267,9 +336,26 @@ mod tests {
     fn apply_moonlight_leaves_position_and_color_untouched() {
         let config = MoonConfig::default();
         let sun = SunState { elevation: -0.3, azimuth: 0.4, intensity: 0.1, color: [0.9, 0.8, 0.7] };
-        let lit = apply_moonlight(sun, appearance(0.5), &config);
+        let lit = apply_moonlight(sun, appearance(0.5), 0.5, &config);
         assert_eq!(lit.elevation, sun.elevation);
         assert_eq!(lit.azimuth, sun.azimuth);
         assert_eq!(lit.color, sun.color);
+    }
+
+    #[test]
+    fn crescent_tilt_is_zero_at_the_poles_and_nonzero_near_the_equator() {
+        let moon = (0.5, 0.5);
+        let sun = (0.9, -0.5);
+        assert_eq!(crescent_tilt_angle(moon, sun, 90.0), 0.0);
+        assert!(crescent_tilt_angle(moon, sun, 0.1).abs() > 0.1);
+    }
+
+    #[test]
+    fn crescent_tilt_points_toward_the_suns_position() {
+        let moon = (0.5, 0.5);
+        let toward_sun_below = crescent_tilt_angle(moon, (0.5, -0.5), 0.0);
+        let toward_sun_above = crescent_tilt_angle(moon, (0.5, 1.5), 0.0);
+        assert!(toward_sun_below < 0.0);
+        assert!(toward_sun_above > 0.0);
     }
 }

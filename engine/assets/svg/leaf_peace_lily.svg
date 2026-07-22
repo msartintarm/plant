@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-17 -80 34 82">
+  <!-- Anchor (0,0) = base of the petiole. Broad glossy oval blade on a
+       long visible petiole, unlike Dracaena's strap or Pothos's heart. -->
+  <path d="M-1.5,0 L-1,-28 L1,-28 L1.5,0 Z" fill="#3a7a41"/>
+  <path d="M0,-24 Q-15,-38 -12,-58 Q-8,-74 0,-78 Q8,-74 12,-58 Q15,-38 0,-24 Z" fill="#2c5e34"/>
+  <path d="M0,-27 L-1,-75 L1,-75 Z" fill="#9fbb8e"/>
+</svg>

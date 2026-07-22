@@ -59,6 +59,9 @@ pub struct SceneLayout {
     /// to fake its current phase — the moon's own unlit surface, not quite
     /// black.
     pub moon_shadow_tint: [f32; 3],
+    /// Max blend fraction toward the sky's own ambient color at full sun
+    /// intensity — see `scene::daytime_fade`.
+    pub moon_daytime_fade_strength: f32,
     /// Ambient tint applied to the wall/window at night (see
     /// `scene::ambient_tint`) — never fully black, a dim moonlit room
     /// rather than a blackout.
@@ -76,15 +79,8 @@ pub struct SceneLayout {
     /// independent by definition, so that phrase and "3 CSS pixels" are the
     /// same target regardless of the viewer's actual resolution.
     pub outline_pixel_width: f32,
-    /// Multiplied against a plant-asset mesh's own baked color to render its
-    /// outline halo — deliberately >1 in every channel so any non-black SVG
-    /// fill saturates to solid white once the scene light's own per-fragment
-    /// multiply is applied (see `scene.wgsl`'s `fs_main`), regardless of how
-    /// dim the room currently is. That's also why this needs to be a fairly
-    /// large multiplier rather than exactly `[1,1,1]`: at night `lit` itself
-    /// is well under 1.0, so a modest tint would still read as gray, not the
-    /// "pop out at night" white halo this is for.
-    pub outline_tint: [f32; 3],
+    pub outline_tint_day: [f32; 3],
+    pub outline_tint_night: [f32; 3],
 
     /// Real GPU depth-buffer Z (see `InstanceUniform::from_transform`) for
     /// the wall/window/pot/soil/trellis/sun/moon layer — farther than
@@ -143,9 +139,29 @@ pub struct SceneLayout {
     /// smaller, sharper highlight; lower is a broader, softer one.
     pub leaf_shininess: f32,
 
+    /// Fixed room position (top-left, like the window is top-right-ish) of
+    /// a wall-mounted lamp — a third light source, always present but only
+    /// actually *lit* at night (see `render/mod.rs`'s lamp-intensity calc).
+    /// Gives leaves a specular sheen after dark the way the cursor light
+    /// does by day, without needing the pointer over the canvas.
+    pub lamp_offset: [f32; 2],
+    pub lamp_scale: f32,
+    /// Diffuse+specular brightness the lamp reaches at full night — scaled
+    /// down toward 0 by day (see `render/mod.rs`).
+    pub lamp_intensity_max: f32,
+    /// Distance-squared falloff — same shape as `cursor_light_falloff`, a
+    /// small local pool of light, not a second window.
+    pub lamp_falloff: f32,
+    /// The fixture's own tint fully off (daytime) vs. fully on (night) —
+    /// same "fade the mesh itself, not just the light it casts" idiom
+    /// `moon_shadow_tint`/`ambient_tint` already use elsewhere.
+    pub lamp_off_tint: [f32; 3],
+    pub lamp_on_tint: [f32; 3],
+
     pub pot_scale: f32,
     pub soil_scale: f32,
     pub seed_scale: f32,
+    pub seed_min_swell_scale_fraction: f32,
     pub cotyledon_scale: f32,
     /// Outward tilt angle (radians) for each cotyledon, fanned symmetrically
     /// left/right from the stem's base — a fixed pose, cotyledons don't
@@ -169,6 +185,11 @@ pub struct SceneLayout {
     /// thick enough to match its width (both would otherwise share the
     /// exact same x position).
     pub trellis_x_offset: f32,
+    /// One-time base lean (radians) a `GrowthHabit::Vine` stem's first
+    /// segment takes toward the trellis, so it reads as reaching for/
+    /// hugging its support instead of growing straight up the pot's
+    /// center. See `scene::stem_segment_angle`.
+    pub vine_trellis_lean_angle: f32,
     /// Fixed size of each `AerialRoot` mark (see `scene::aerial_root_
     /// transform`) — cosmetic and small, not tied to any growing quantity,
     /// so a single constant rather than a `_scale` multiplying something
@@ -203,6 +224,13 @@ pub struct SceneLayout {
     /// in a fixed direction (toward the window) regardless of which side
     /// of the stem the leaf is on.
     pub leaf_helio_max_angle: f32,
+    /// `GrowthHabit::BasalRosette` fan spread (radians) for a just-emerged
+    /// leaf — see `scene::rosette_leaf_transform`.
+    pub rosette_leaf_min_spread_angle: f32,
+    /// Same, for a leaf at/past `rosette_leaf_splay_age`.
+    pub rosette_leaf_max_spread_angle: f32,
+    /// Sim-time age at which a rosette leaf reaches full splay.
+    pub rosette_leaf_splay_age: f64,
     /// Multiplies (not replaces) the leaf mesh's own baked green at
     /// `Leaf::senescence == 0.5` — since `tint` multiplies rather than sets
     /// color, this biases the mesh's own green toward yellow rather than
@@ -317,10 +345,12 @@ impl Default for SceneLayout {
             sky_object_local_x_range: [-15.0, 15.0],
             sky_object_local_y_range: [-10.0, 25.0],
             moon_shadow_tint: [0.08, 0.08, 0.12],
+            moon_daytime_fade_strength: 0.85,
             night_ambient_color: [0.30, 0.34, 0.48],
             scene_light_falloff: 4.0,
             outline_pixel_width: 3.0,
-            outline_tint: [10.0, 10.0, 10.0],
+            outline_tint_day: [3.0, 2.2, 0.7],
+            outline_tint_night: [1.2, 2.6, 3.2],
             background_depth: 0.9,
             trellis_depth: 0.7,
             plant_depth: 0.5,
@@ -333,14 +363,27 @@ impl Default for SceneLayout {
             cursor_light_intensity: 0.35,
             cursor_light_falloff: 60.0,
             leaf_shininess: 20.0,
+            lamp_offset: [-0.62, 0.75],
+            lamp_scale: 0.012,
+            // Deliberately brighter and further-reaching than strict
+            // realism would call for (comparable falloff to the window
+            // light itself) — a game readability choice, so the plant
+            // stays clearly visible at night, not just a faint sliver near
+            // the fixture.
+            lamp_intensity_max: 0.6,
+            lamp_falloff: 5.0,
+            lamp_off_tint: [0.35, 0.32, 0.28],
+            lamp_on_tint: [1.3, 1.15, 0.7],
             pot_scale: 0.01,
             soil_scale: 0.01,
             seed_scale: 0.01,
+            seed_min_swell_scale_fraction: 0.55,
             cotyledon_scale: 0.012,
             cotyledon_spread_angle: 0.4,
             flower_scale: 0.009,
             trellis_width_scale: 0.004,
             trellis_x_offset: 0.03,
+            vine_trellis_lean_angle: 0.45,
             aerial_root_scale: 0.006,
 
             stem_height_scale: 0.006,
@@ -352,6 +395,9 @@ impl Default for SceneLayout {
             leaf_fold_max_angle: 0.8,
             leaf_droop_max_angle: 0.9,
             leaf_helio_max_angle: 0.3,
+            rosette_leaf_min_spread_angle: 0.15,
+            rosette_leaf_max_spread_angle: 1.1,
+            rosette_leaf_splay_age: 500.0,
             // Tuned against leaf.svg's own baked green (#5a9c4e ≈ [0.35,
             // 0.61, 0.31]): multiplying by these lands roughly on a
             // yellowing olive and a dry brown respectively, rather than

@@ -23,6 +23,9 @@ struct Instance {
     // opts out without an extra branch/uniform. See `SceneLayout::
     // leaf_shininess`.
     shininess: f32,
+    // Nonzero for the window pane only — see `scene::with_transmissive`
+    // and `fs_main`.
+    transmissive: f32,
     // Multiplied against the mesh's own baked vertex color — how the
     // day/night light level shows up on background pieces (see
     // `scene::ambient_tint`). [1,1,1] leaves a mesh's own color unchanged.
@@ -48,6 +51,14 @@ struct SceneLight {
     cursor_pos: vec2<f32>,
     cursor_intensity: f32,
     cursor_falloff: f32,
+    // A third, fixed-position light (a wall lamp) — see `scene::
+    // SceneLayout::lamp_offset`. Only actually bright at night
+    // (`render/mod.rs` scales `lamp_intensity` down toward 0 by day), so
+    // leaves get a specular sheen after dark the same way the cursor light
+    // gives them one by day.
+    lamp_pos: vec2<f32>,
+    lamp_intensity: f32,
+    lamp_falloff: f32,
 };
 
 @group(1) @binding(0) var<uniform> light: SceneLight;
@@ -104,6 +115,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (instance.transmissive > 0.0) {
+        let glow = light.ambient_floor + light.color * light.intensity;
+        return vec4<f32>(in.color * glow, 1.0);
+    }
     let dist = distance(light.pos, in.world_pos);
     let falloff_term = light.intensity / (1.0 + light.falloff * dist * dist);
     let cursor_dist = distance(light.cursor_pos, in.world_pos);
@@ -112,7 +127,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // small, local pool of light around the pointer rather than relighting
     // the whole room.
     let cursor_term = light.cursor_intensity / (1.0 + light.cursor_falloff * cursor_dist * cursor_dist);
-    let lit = light.ambient_floor + light.color * falloff_term + vec3<f32>(1.0, 0.98, 0.9) * cursor_term;
+    let lamp_dist = distance(light.lamp_pos, in.world_pos);
+    let lamp_term = light.lamp_intensity / (1.0 + light.lamp_falloff * lamp_dist * lamp_dist);
+    let lit = light.ambient_floor
+        + light.color * falloff_term
+        + vec3<f32>(1.0, 0.98, 0.9) * cursor_term
+        + vec3<f32>(1.0, 0.85, 0.6) * lamp_term;
 
     var specular = vec3<f32>(0.0, 0.0, 0.0);
     if (instance.shininess > 0.0) {
@@ -127,15 +147,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let uv = in.local_pos / instance.local_extent;
         let r2 = clamp(dot(uv, uv), 0.0, 1.0);
         let normal = normalize(vec3<f32>(uv, sqrt(1.0 - r2)));
-        // The cursor light is given a small notional height above the flat
-        // scene plane (0.5) purely so its direction isn't perfectly
-        // in-plane — with no real depth position of its own, a highlight
-        // still has to come from *somewhere* not directly on the surface.
-        let light_dir = normalize(vec3<f32>(light.cursor_pos - in.world_pos, 0.5));
         let view_dir = vec3<f32>(0.0, 0.0, 1.0);
-        let half_dir = normalize(light_dir + view_dir);
-        let spec_term = pow(max(dot(normal, half_dir), 0.0), instance.shininess);
-        specular = vec3<f32>(1.0, 1.0, 0.95) * spec_term * cursor_term;
+
+        // The cursor/lamp lights are each given a small notional height
+        // above the flat scene plane (0.5) purely so their direction isn't
+        // perfectly in-plane — with no real depth position of their own, a
+        // highlight still has to come from *somewhere* not directly on the
+        // surface.
+        let cursor_light_dir = normalize(vec3<f32>(light.cursor_pos - in.world_pos, 0.5));
+        let cursor_half_dir = normalize(cursor_light_dir + view_dir);
+        let cursor_spec = pow(max(dot(normal, cursor_half_dir), 0.0), instance.shininess);
+
+        let lamp_light_dir = normalize(vec3<f32>(light.lamp_pos - in.world_pos, 0.5));
+        let lamp_half_dir = normalize(lamp_light_dir + view_dir);
+        let lamp_spec = pow(max(dot(normal, lamp_half_dir), 0.0), instance.shininess);
+
+        specular = vec3<f32>(1.0, 1.0, 0.95) * cursor_spec * cursor_term
+            + vec3<f32>(1.0, 0.85, 0.6) * lamp_spec * lamp_term;
     }
 
     return vec4<f32>(in.color * lit + specular, 1.0);

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-17 -45 34 45">
+  <!-- Anchor (0,0) = base of the blade, at the heart's own cleft.
+       Cordate (heart-shaped) blade — two rounded lobes near the base
+       tapering to a point at the tip — plus a lighter variegation patch. -->
+  <path d="M0,0 Q10,-2 14,-12 Q17,-22 8,-30 Q4,-38 0,-45 Q-4,-38 -8,-30 Q-17,-22 -14,-12 Q-10,-2 0,0 Z" fill="#4f9142"/>
+  <path d="M-6,-25 Q-2,-30 2,-25 Q4,-18 0,-14 Q-5,-16 -6,-25 Z" fill="#c9d97a"/>
+</svg>

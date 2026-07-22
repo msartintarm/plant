@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-10 -8 20 16">
+  <!-- Anchor (0,0) = center, like sun/moon/window_frame. A small wall
+       sconce: backplate + bulb. Tinted at draw time by how "on" it
+       currently is (see scene::lamp_transform's caller). -->
+  <rect x="-4" y="-7" width="8" height="4" fill="#5b5142"/>
+  <circle cx="0" cy="1" r="6" fill="#f5e6a8"/>
+</svg>

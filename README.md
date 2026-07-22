@@ -17,7 +17,7 @@ is authored as SVG and tessellated into GPU triangle meshes at build time
 
 - `engine/` — Rust, compiled to WebAssembly via `wasm-pack`
   - `src/sim/` — pure simulation logic, no wgpu/DOM dependency, unit- and
-    integration-tested with plain `cargo test` (97 tests)
+    integration-tested with plain `cargo test` (201 tests)
     - `sun.rs` — sun elevation/azimuth/intensity/color from `day_progress`
     - `climate.rs` — ambient temperature from `day_progress` (phase-lagged
       behind peak sunlight, like real thermal mass), plus the general
@@ -189,29 +189,47 @@ readily and spends at least as much time in bloom as resting.
 All rendered in real time from `wgpu`, with the sun/moon visibly arcing through
 the window and the room's ambient tint shifting with the day/night cycle.
 
-Verified several ways: `cargo test` (130 tests — 97 in `sim/`, including
+Verified several ways: `cargo test` (286 tests — 201 in `sim/`, including
 `sim::playthrough_tests`, which replay the actual real-time-to-sim-time
 pacing the render loop uses and is how several real bugs were found, see
-below; 33 in `render::scene`, covering exactly the placement/geometry a
-human would otherwise check by eyeballing a screenshot — including the
-light beam's and trellis's own direction/scale math, verified by
+below; 85 in `render::scene`, covering exactly the placement/geometry a
+human would otherwise check by eyeballing a screenshot — sun/moon/lamp
+position and the trellis's own direction/scale math, verified by
 replicating `scene.wgsl`'s actual vertex-shader formula in the test itself
 rather than trusting a screenshot, which is what caught a genuine 180°
-sign error in an earlier attempt at the light beam's angle); `vitest` (15
-tests for `web/src/lib/formatStats.ts`, the HUD's pure display-formatting
-logic); Playwright (5 end-to-end tests covering wasm load, live HUD state,
-the water/time-scale controls, the auto-water toggle, and species
-switching); and, for the rendering pipeline itself, browser screenshots
-confirming it matches what the tests predict (germination, cotyledon
-unfurl, growth/thickening, nyctinastic fold, sun/moon position and tinting,
-leaves distributed up a visibly long stem, dynamic zoom-out, a terminal
-flower at the stem's tip lining up exactly with the curved stem beneath it,
-all three species' distinct silhouettes including Pothos visibly climbing
-straight alongside its trellis with aerial roots peeking out beside the
-stem and then flopping over to lean toward light once it outgrows the
-support, the light beam shining from window to plant and dimming at night,
-each species' own flower mesh opening during its bloom phase, leaves
-visibly yellowing/browning with age, HUD overlay including temperature).
+sign error in an earlier version of this kind of angle math); `vitest`
+(unit tests for `web/src/lib/`, the HUD's pure display-formatting logic);
+Playwright (a dozen end-to-end tests covering wasm load, live HUD state,
+the water/time-scale controls, the auto-water toggle, species switching,
+the empty-room-until-first-plant flow, and the moon's phase actually
+advancing over a session); and, for the rendering pipeline itself, browser
+screenshots confirming it matches what the tests predict.
+
+Room lighting is a real GPU point-light system (`scene::SceneLightUniform`,
+`scene.wgsl`), not a single baked "light beam" mesh: the window, a
+cursor-tracking highlight, and a wall-mounted lamp (only actually lit at
+night, tuned bright enough to be genuinely useful for seeing the plant
+after dark, not just realistic) each contribute their own per-pixel
+diffuse falloff and Blinn-Phong specular sheen on leaves. The window pane
+itself is a distinct *transmissive* material (`scene::with_transmissive`)
+that glows with the room light's own color/intensity directly, separate
+from the opaque frame around it, which is lit normally like everything
+else. Outline halos pick up the same lighting rather than being pinned to
+a flat white, so they read warmer by day and cooler at night. The moon
+runs on a real synodic-month cycle grounded in the actual calendar date
+(`sim::moon::phase_for_date`), rises/sets at a time that shifts correctly
+with its current phase rather than always being exactly opposite the sun,
+is shown diagonally opposite the sun's own window position, and fades
+toward the sky's own color in daylight instead of staying stark white. The
+room can hold several plants at once, side by side, from a starting
+inventory (one of each species — take a cutting from any of them to
+restock it), each independently selectable/actionable; a per-plant
+"realistic scale" option caps growth near that species' real mature size
+instead of the default unbounded growth. Pruning is now two separately
+selectable tools (leaves vs. stem segments), each only shown once there's
+actually something of that kind to act on. The room's own view can be
+dragged (mouse or touch) to look around, independent of the camera's
+automatic zoom-out as a plant grows.
 
 The `web/` demo's pacing (`sim::config::TimeConfig`) is tuned aggressively —
 a 5-real-second day/night cycle — specifically so this demo is useful for
@@ -271,6 +289,42 @@ Known gaps / not yet built:
   oversight: the water balance was only just recalibrated after a real
   crash-to-bone-dry bug, and layering in another multiplicative factor
   deserves its own dedicated pass, not an incidental addition here.
+- **Branches can never flower, only the main stem can.** Verified against
+  the actual code, not the module doc comment (which claims crown release
+  is triggered by "producing a terminal flower" — `branch_eligible` in
+  `step_vegetative` shows this isn't true; branching is purely
+  height/carbon-gated, with no tie to bloom state at all, so that comment
+  is aspirational or stale, not a description of what's implemented).
+  `bloom_intensity`/`bloom_cycle_position` live only on `Plant`, and
+  `render::scene::flower_transform` only ever anchors to the main stem's
+  own tip via `main_curve`/`plant.height` — there is exactly one flower
+  drawable per plant, full stop. Real Dracaena branches each terminate in
+  their own inflorescence over the plant's life, independently. Planned
+  fix: give `Branch` its own `bloom_intensity`/`bloom_cycle_position`
+  fields, extract the (currently `Plant`-only) bloom-cycle computation
+  into a function reusable for both, gate a branch's own eligibility on
+  its *own* height crossing `flowering_height_threshold`, and give
+  rendering a per-branch flower drawable pool (today there's exactly one;
+  needs `MAX_BRANCHES + 1`). TDD entry point: a native test asserting a
+  branch can reach `bloom_intensity > 0` under the same conditions that
+  already make the main stem bloom.
+- **No way to deadhead a spent flower, and no mechanical consequence
+  modeled if there were.** The pick system only ever resolves to a leaf or
+  a stem segment (`scene::PickTarget`) — a flower isn't a pick target at
+  all, so "cutting off a flower" isn't currently a distinct action; the
+  closest thing is pruning the main stem near the tip, which severs the
+  flower as an incidental side effect of removing everything above the
+  cut, not a deadheading action with its own effect. Real deadheading
+  stops a plant spending carbon maturing seed and, for repeat bloomers,
+  often shortens the wait to the next bloom. Planned fix: add a `Flower`
+  `PickTarget` variant, and on deadheading immediately zero `bloom_
+  intensity` and fast-forward `bloom_cycle_position` to the start of
+  `bloom_rest_duration` — skipping whatever "still open" time remained
+  rather than idling through it — so a repeat bloomer's next bloom
+  genuinely arrives sooner, the real benefit deadheading has. Open design
+  question worth resolving before building it: does this become a third
+  selectable tool alongside Prune/Trim, or fold into Prune (a flower is
+  arguably closer to a leaf than a stem, mechanically)?
 
 ## Non-obvious design points
 

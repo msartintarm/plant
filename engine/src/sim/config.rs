@@ -46,8 +46,9 @@ impl Default for SunConfig {
 pub struct MoonConfig {
     /// 0.0..1.0 — where the real lunar cycle actually is right now (see
     /// `moon::phase_for_date`), used as the starting point for a fresh
-    /// session. Location doesn't change this (only moonrise/set timing,
-    /// which this side-profile scene doesn't model at all).
+    /// session. Illuminated fraction is the same everywhere; only rise/set
+    /// timing (`moon::arc_position`) and crescent tilt (`observer_latitude_
+    /// degrees`) depend on location.
     pub initial_phase: f64,
     /// Sim-seconds for one full 29.53-day synodic month, applied to the
     /// game's own (already-compressed) day unit — this engine has no live
@@ -64,6 +65,11 @@ pub struct MoonConfig {
     /// noticeable-but-modest assist on a bright moonlit night, not a
     /// substitute for actual daylight.
     pub max_light_contribution: f64,
+    /// Fixed observer latitude (degrees, +north/-south) for crescent tilt
+    /// (`moon::crescent_tilt_angle`) — no live geolocation exists, so this
+    /// defaults to San Francisco, matching `EngineCanvas.tsx`'s
+    /// display-only `SEED_LOCATION`.
+    pub observer_latitude_degrees: f64,
 }
 
 impl Default for MoonConfig {
@@ -78,6 +84,7 @@ impl Default for MoonConfig {
             initial_phase: super::moon::phase_for_date(2026, 7, 20),
             cycle_length_sim_seconds: 29.530588853 * TimeConfig::default().day_length_sim_seconds,
             max_light_contribution: 0.05,
+            observer_latitude_degrees: 37.7749,
         }
     }
 }
@@ -345,6 +352,19 @@ impl Default for SeasonConfig {
     }
 }
 
+/// A species' above-ground silhouette — explicit rather than inferred from
+/// `max_branches`/`trellis_height`. Drives leaf/stem placement in
+/// `render::scene`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowthHabit {
+    /// Single elongating stem, optional crown branches — Dracaena.
+    UprightCane,
+    /// Leaves fan from a stemless crown at soil level — Peace Lily.
+    BasalRosette,
+    /// Climbs a support via aerial roots — Pothos.
+    Vine,
+}
+
 /// Plant growth-model rates — see `plant::Plant`. Grouped by the same
 /// mechanism headings used in `plant.rs`'s module docs.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -415,6 +435,13 @@ pub struct PlantConfig {
     /// How much further above `window_light_zone_height` light keeps
     /// fading before bottoming out at `ambient_light_floor`.
     pub window_light_falloff_range: f64,
+    /// This species' realistic mature height/branch-length — only enforced
+    /// when `Plant::realistic_scale` is on (see `realistic_scale_taper`);
+    /// with it off, growth stays today's default unbounded "gigantic
+    /// plant" behavior. A real houseplant's practical ceiling, not a hard
+    /// biological one — tuned per species (a trained Pothos vine trails
+    /// much longer than a Peace Lily rosette ever gets tall).
+    pub realistic_max_height: f64,
     /// Never quite zero even far from the window — real rooms have some
     /// ambient light bouncing around.
     pub ambient_light_floor: f64,
@@ -542,6 +569,12 @@ pub struct PlantConfig {
     /// is *reduced*, not fully gone) — this multiplies
     /// `base_elongation_rate` for branch growth specifically.
     pub branch_elongation_rate_factor: f64,
+
+    /// See `GrowthHabit` — drives leaf/stem placement in `render/mod.rs`.
+    pub growth_habit: GrowthHabit,
+    /// Baked leaf mesh name — same per-frame repoint mechanism as
+    /// `flower_mesh_name` below.
+    pub leaf_mesh_name: &'static str,
 
     // --- Flowering (purely cosmetic — a terminal bloom that cycles open
     // and closed once the plant is mature enough, see `Plant::
@@ -805,6 +838,9 @@ impl PlantConfig {
             // over a comparable further stretch above it.
             window_light_zone_height: 4.9,
             window_light_falloff_range: 4.0,
+            // A real indoor Dracaena reaches ceiling height over years —
+            // comparable to, or a bit past, its own window.
+            realistic_max_height: 5.5,
             ambient_light_floor: 0.15,
 
             light_use_efficiency: 0.05,
@@ -858,6 +894,9 @@ impl PlantConfig {
             min_height_for_branching: 0.6,
             max_branches: 4,
             branch_elongation_rate_factor: 0.6,
+
+            growth_habit: GrowthHabit::UprightCane,
+            leaf_mesh_name: "leaf",
 
             flowering_height_threshold: 0.6,
             flower_mesh_name: "flower_dracaena",
@@ -940,12 +979,19 @@ impl PlantConfig {
             base_elongation_rate: 0.0003,
             plastochron_height_interval: 0.011,
             max_branches: 0,
+            cutting_min_height: 0.08,
+            cutting_start_height: 0.01,
+            growth_habit: GrowthHabit::BasalRosette,
+            leaf_mesh_name: "leaf_peace_lily",
             // A squat rosette's own "stem" (the compressed crown) never
             // gets tall enough for this to matter functionally once
             // `max_branches` is 0, but keep it consistent with the scaled-
             // down height range rather than leaving Dracaena's much taller
             // trigger in place unused.
             min_height_for_branching: 0.05,
+            // A mature Peace Lily rosette stays low and compact — a small
+            // fraction of Dracaena's own realistic ceiling.
+            realistic_max_height: 0.25,
             // Blooms once it's grown a reasonably full rosette — tuned to
             // the same scaled-down height range as the fields above.
             flowering_height_threshold: 0.045,
@@ -979,6 +1025,12 @@ impl PlantConfig {
             base_elongation_rate: 0.006,
             ambient_light_floor: 0.35,
             max_branches: 2,
+            growth_habit: GrowthHabit::Vine,
+            leaf_mesh_name: "leaf_pothos",
+            // A real trained Pothos keeps trailing well past its own
+            // support once it outgrows it (see `trellis_height: Some(3.0)`
+            // above) — several times that support's own height.
+            realistic_max_height: 12.0,
             new_branch_carbon_cost: 14.0,
             flowering_height_threshold: 50.0,
             // If a session ever did somehow reach that height, Pothos
@@ -1047,6 +1099,33 @@ mod species_tests {
         // structure) rather than getting a bespoke asset nobody would ever
         // realistically see — see PlantConfig::pothos's own doc comment.
         assert_eq!(PlantConfig::pothos().flower_mesh_name, "flower_peace_lily");
+    }
+
+    #[test]
+    fn each_species_points_at_its_own_botanically_accurate_leaf_mesh_and_growth_habit() {
+        let dracaena = PlantConfig::dracaena();
+        let peace_lily = PlantConfig::peace_lily();
+        let pothos = PlantConfig::pothos();
+        assert_eq!(dracaena.leaf_mesh_name, "leaf");
+        assert_eq!(peace_lily.leaf_mesh_name, "leaf_peace_lily");
+        assert_eq!(pothos.leaf_mesh_name, "leaf_pothos");
+        // Every species' own leaf mesh is distinct — no two share a shape.
+        assert_ne!(dracaena.leaf_mesh_name, peace_lily.leaf_mesh_name);
+        assert_ne!(dracaena.leaf_mesh_name, pothos.leaf_mesh_name);
+        assert_ne!(peace_lily.leaf_mesh_name, pothos.leaf_mesh_name);
+
+        assert_eq!(dracaena.growth_habit, GrowthHabit::UprightCane);
+        assert_eq!(peace_lily.growth_habit, GrowthHabit::BasalRosette);
+        assert_eq!(pothos.growth_habit, GrowthHabit::Vine);
+    }
+
+    #[test]
+    fn each_species_has_its_own_distinct_realistic_max_height() {
+        let dracaena = PlantConfig::dracaena();
+        let peace_lily = PlantConfig::peace_lily();
+        let pothos = PlantConfig::pothos();
+        assert!(peace_lily.realistic_max_height < dracaena.realistic_max_height, "a rosette should stay far shorter than a cane");
+        assert!(pothos.realistic_max_height > dracaena.realistic_max_height, "a trained vine should realistically trail longer than a cane grows tall");
     }
 
     #[test]

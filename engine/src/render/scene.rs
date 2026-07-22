@@ -46,7 +46,12 @@ pub struct InstanceUniform {
     /// 0 disables it entirely (every non-leaf mesh). See
     /// `with_leaf_specular`/`SceneLayout::leaf_shininess`.
     pub shininess: f32,
-    pub _pad0: [f32; 3],
+    /// Nonzero for a light-*transmitting* surface (currently only the
+    /// window pane — see `with_transmissive`) — `fs_main` glows it with the
+    /// room light's own color/intensity directly rather than lighting it
+    /// *by* that light at a distance the way every opaque mesh is.
+    pub transmissive: f32,
+    pub _pad0: [f32; 2],
     pub tint: [f32; 3],
     pub _pad1: f32,
 }
@@ -70,11 +75,19 @@ impl InstanceUniform {
             rotation: t.rotation,
             depth: depth.clamp(0.0, 1.0),
             shininess: 0.0,
-            _pad0: [0.0; 3],
+            transmissive: 0.0,
+            _pad0: [0.0; 2],
             tint: t.tint,
             _pad1: 0.0,
         }
     }
+}
+
+/// Marks an `InstanceUniform` as light-transmitting (the window pane) —
+/// see its own field doc and `fs_main`.
+pub fn with_transmissive(mut uniform: InstanceUniform) -> InstanceUniform {
+    uniform.transmissive = 1.0;
+    uniform
 }
 
 /// Turns on the cursor specular highlight for one `InstanceUniform` — see
@@ -229,10 +242,8 @@ pub fn decode_pick_target(rgba: [u8; 4]) -> Option<PickTarget> {
 /// (via the real GPU depth test), guaranteeing the normal fill wins over
 /// its own halo regardless of which one happens to be drawn first, while
 /// still letting a genuinely nearer *neighboring* instance's own draw beat
-/// this one fairly. `tint` is normally `layout.outline_tint` (white); the
-/// currently hover-picked leaf passes `layout.hover_outline_tint` (red)
-/// instead — a plain parameter rather than something this function decides
-/// on its own, so it stays a pure function of its inputs.
+/// this one fairly. `tint` is a plain parameter, not something this
+/// function decides on its own.
 pub fn outline_uniform(
     t: &Transform,
     aspect: f32,
@@ -284,27 +295,37 @@ pub struct SceneLightUniform {
     pub cursor_pos: [f32; 2],
     pub cursor_intensity: f32,
     pub cursor_falloff: f32,
+    /// A third, fixed-position light (a wall lamp — see `SceneLayout::
+    /// lamp_offset`) that only actually lights anything at night (eased by
+    /// `sun.intensity`, computed in `new` below — the same "how dark is it
+    /// right now" input the window light itself already reads). Zoom- and
+    /// pan-adjusted the same way `pos` is, unlike `cursor_pos`.
+    pub lamp_pos: [f32; 2],
+    pub lamp_intensity: f32,
+    pub lamp_falloff: f32,
 }
 
 impl SceneLightUniform {
-    /// `zoom`-scaled the same way `InstanceUniform::from_transform` scales
-    /// every other offset, so distances computed against it in the shader
-    /// use the same convention every mesh's own world position already
-    /// does. `cursor_ndc` is already in that same clip-space convention
-    /// (see `render::mod`'s conversion from canvas pixels) and is *not*
-    /// further zoom-scaled — unlike `pos` (a world-anchored point that
-    /// should visually shrink toward center as the camera zooms out with
+    /// `zoom`/`pan`-adjusted the same way `InstanceUniform::from_transform`
+    /// adjusts every other offset, so distances computed against `pos`/
+    /// `lamp_pos` in the shader use the same convention every mesh's own
+    /// world position already does. `cursor_ndc` is already in that same
+    /// clip-space convention (see `render::mod`'s conversion from canvas
+    /// pixels) and is *not* further zoom/pan-adjusted — unlike `pos`/`lamp_
+    /// pos` (world-anchored points that should visually shrink toward
+    /// center as the camera zooms out, and shift as it pans, with
     /// everything else), the cursor is a screen-space concept: wherever the
     /// mouse sits on screen is exactly where the highlight should be,
-    /// regardless of zoom. `None` (pointer not over the canvas) zeroes
+    /// regardless of zoom/pan. `None` (pointer not over the canvas) zeroes
     /// `cursor_intensity`, turning the whole term off in the shader.
-    pub fn new(sun: &SunState, layout: &SceneLayout, zoom: f32, cursor_ndc: Option<[f32; 2]>) -> Self {
+    pub fn new(sun: &SunState, layout: &SceneLayout, zoom: f32, pan: [f32; 2], cursor_ndc: Option<[f32; 2]>) -> Self {
         let (cursor_pos, cursor_intensity) = match cursor_ndc {
             Some(pos) => (pos, layout.cursor_light_intensity),
             None => ([0.0, 0.0], 0.0),
         };
+        let lamp_intensity = layout.lamp_intensity_max * (1.0 - sun.intensity.clamp(0.0, 1.0)) as f32;
         SceneLightUniform {
-            pos: [layout.window_offset[0] * zoom, layout.window_offset[1] * zoom],
+            pos: [layout.window_offset[0] * zoom + pan[0], layout.window_offset[1] * zoom + pan[1]],
             intensity: sun.intensity as f32,
             falloff: layout.scene_light_falloff,
             color: sun.color,
@@ -314,7 +335,32 @@ impl SceneLightUniform {
             cursor_pos,
             cursor_intensity,
             cursor_falloff: layout.cursor_light_falloff,
+            lamp_pos: [layout.lamp_offset[0] * zoom + pan[0], layout.lamp_offset[1] * zoom + pan[1]],
+            lamp_intensity,
+            lamp_falloff: layout.lamp_falloff,
         }
+    }
+}
+
+/// How much the lamp fixture's own tint (not the light it casts — see
+/// `SceneLightUniform::new`) should read as "on," 0.0 (day) ..= 1.0
+/// (night) — same driver, kept in sync so the fixture visibly lights up
+/// exactly when it starts actually casting light.
+pub fn lamp_on_fraction(sun_intensity: f64) -> f32 {
+    (1.0 - sun_intensity.clamp(0.0, 1.0)) as f32
+}
+
+/// The wall lamp's own fixed transform (see `SceneLayout::lamp_offset`) —
+/// tint is the caller's job (`render/mod.rs`, based on how "on" it
+/// currently is), matching how `sky_object_transform` leaves the sun/moon
+/// disc's tint to its own callers.
+pub fn lamp_transform(layout: &SceneLayout) -> Transform {
+    Transform {
+        offset: layout.lamp_offset,
+        scale_x: layout.lamp_scale,
+        scale_y: layout.lamp_scale,
+        rotation: 0.0,
+        tint: NO_TINT,
     }
 }
 
@@ -391,7 +437,7 @@ pub struct Transform {
 
 const NO_TINT: [f32; 3] = [1.0, 1.0, 1.0];
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
+pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
@@ -421,6 +467,16 @@ pub fn room_background(layout: &SceneLayout) -> Vec<BackgroundSpec> {
         },
         BackgroundSpec {
             mesh: "window_frame",
+            transform: Transform {
+                offset: layout.window_offset,
+                scale_x: layout.window_scale,
+                scale_y: layout.window_scale,
+                rotation: 0.0,
+                tint: NO_TINT,
+            },
+        },
+        BackgroundSpec {
+            mesh: "window_pane",
             transform: Transform {
                 offset: layout.window_offset,
                 scale_x: layout.window_scale,
@@ -478,13 +534,20 @@ pub fn ambient_tint(sun: &SunState, layout: &SceneLayout) -> [f32; 3] {
     ]
 }
 
+pub fn outline_tint_for_sun(sun_intensity: f64, layout: &SceneLayout) -> [f32; 3] {
+    let t = sun_intensity.clamp(0.0, 1.0) as f32;
+    let night = layout.outline_tint_night;
+    let day = layout.outline_tint_day;
+    [lerp(night[0], day[0], t), lerp(night[1], day[1], t), lerp(night[2], day[2], t)]
+}
+
 /// Where the sun (or moon) sits inside the window pane — the most "in
 /// context" way to show the light's current *angle*, alongside the tint
 /// above for its intensity/color. Shares one arc shape for both bodies (not
 /// a separate lunar model — a deliberate simplification): whichever is up
 /// traces a low-to-high path across the window as its own "day" progresses.
-/// Caller decides which mesh ("sun" vs "moon") to draw based on
-/// `sun.elevation`'s sign.
+/// Caller decides whether to actually draw the sun/moon based on each
+/// body's own elevation (see `render/mod.rs`).
 ///
 /// Takes `aspect` because, unlike every other transform here (which just
 /// hands `scale_x`/`scale_y` to `InstanceUniform::from_transform` and lets
@@ -518,28 +581,47 @@ pub fn sky_object_transform(sun: &SunState, layout: &SceneLayout, aspect: f32) -
     }
 }
 
+/// The moon's own on-screen position, mirrored from wherever the sun
+/// currently sits — shown diagonally opposite it rather than tracing an
+/// independent arc that could visually coincide with it. Mirrors azimuth
+/// and elevation-factor within the same 0..1 domain `sky_object_transform`
+/// already maps (reflecting through 1.0, not 0), so the result always
+/// stays inside the same in-bounds range the sun's own position does.
+pub fn moon_position_opposite_sun(sun: &SunState) -> SunState {
+    SunState {
+        elevation: 1.0 - sun.elevation.abs().clamp(0.0, 1.0),
+        azimuth: 1.0 - sun.azimuth.clamp(0.0, 1.0),
+        intensity: 0.0,
+        color: NO_TINT,
+    }
+}
+
 /// A second "shadow" disc, same size and position as the moon's own (see
 /// `sky_object_transform`), shifted sideways by `appearance.illuminated_
 /// fraction` — drawn on top of the moon disc, this is the classic flat-icon
 /// two-circle trick for a crescent/gibbous moon: at illuminated_fraction 0
 /// the shadow disc exactly covers the moon (fully dark), at 1.0 it's shifted
 /// a full diameter away (moon fully lit), in between it eats into one side.
-/// Shifts right while waxing, left while waning (this scene's convention —
-/// not tied to a real hemisphere). Divides the shift by `aspect` for the
-/// same reason `sky_object_transform`'s own offset does: offsets aren't
-/// aspect-corrected automatically the way scale is (see `InstanceUniform::
-/// from_transform`), so a hand-computed offset delta has to redo it.
+/// Shifts right while waxing, left while waning, rotated by `tilt_angle`
+/// (see `sim::moon::crescent_tilt_angle`) — 0.0 reproduces the old
+/// pure-horizontal shift exactly. Only the x component needs the `aspect`
+/// divide (see `sky_object_transform`'s own offset handling — offsets
+/// aren't aspect-corrected automatically the way scale is).
 pub fn moon_shadow_transform(
     sky_transform: &Transform,
     appearance: &MoonAppearance,
+    tilt_angle: f32,
     layout: &SceneLayout,
     aspect: f32,
 ) -> Transform {
     let side_sign = if appearance.waxing { 1.0 } else { -1.0 };
-    let shift =
-        (2.0 * layout.sky_object_scale * appearance.illuminated_fraction as f32 * side_sign) / aspect;
+    let magnitude = 2.0 * layout.sky_object_scale * appearance.illuminated_fraction as f32 * side_sign;
+    let (sin_t, cos_t) = tilt_angle.sin_cos();
     Transform {
-        offset: [sky_transform.offset[0] + shift, sky_transform.offset[1]],
+        offset: [
+            sky_transform.offset[0] + magnitude * cos_t / aspect,
+            sky_transform.offset[1] + magnitude * sin_t,
+        ],
         scale_x: sky_transform.scale_x,
         scale_y: sky_transform.scale_y,
         rotation: 0.0,
@@ -547,12 +629,24 @@ pub fn moon_shadow_transform(
     }
 }
 
+/// Fades a night-sky tint toward the window's own ambient sky color as
+/// `sun_intensity` rises — a real daytime moon isn't literally darker, it
+/// just loses contrast against a much brighter scattering sky, which is
+/// why it's hard to spot. `max_fade` caps the blend short of 1.0 so it
+/// stays at least faintly visible at noon rather than vanishing outright.
+pub fn daytime_fade(base: [f32; 3], ambient: [f32; 3], sun_intensity: f64, max_fade: f32) -> [f32; 3] {
+    let t = sun_intensity.clamp(0.0, 1.0) as f32 * max_fade;
+    [lerp(base[0], ambient[0], t), lerp(base[1], ambient[1], t), lerp(base[2], ambient[2], t)]
+}
+
 /// Only actually drawn pre-germination (`Stage::Seed`) — see `render/mod.rs`.
-pub fn seed_transform(layout: &SceneLayout) -> Transform {
+pub fn seed_transform(layout: &SceneLayout, swell_fraction: f64) -> Transform {
+    let t = swell_fraction.clamp(0.0, 1.0) as f32;
+    let scale = layout.seed_scale * lerp(layout.seed_min_swell_scale_fraction, 1.0, t);
     Transform {
         offset: layout.pot_anchor,
-        scale_x: layout.seed_scale,
-        scale_y: layout.seed_scale,
+        scale_x: scale,
+        scale_y: scale,
         rotation: 0.0,
         tint: NO_TINT,
     }
@@ -657,6 +751,10 @@ pub struct StemCurve<'a> {
     /// always implicitly +1.0 (no flip), the stem leaned away from a
     /// window placed at positive x, the opposite of real phototropism.
     pub lean_sign: f32,
+    /// `GrowthHabit::Vine` only — one-time lean its first segment takes
+    /// toward the trellis (see `SceneLayout::vine_trellis_lean_angle`), 0.0
+    /// for every other habit.
+    pub vine_base_lean_angle: f32,
 }
 
 /// Which sign to apply to an unsigned `lean_angle` magnitude (see
@@ -683,7 +781,8 @@ fn stem_segment_angle(curve: &StemCurve, segment_index: usize) -> f32 {
     } else {
         (curve.current_lean_angle + curve.current_extra_angle) as f32
     };
-    curve.base.angle + curve.lean_sign * lean_and_extra
+    let vine_lean = if segment_index == 0 { curve.vine_base_lean_angle } else { 0.0 };
+    curve.base.angle + curve.lean_sign * lean_and_extra + vine_lean
 }
 
 /// Walks `curve` from its base up to (at most) `target_height`, returning
@@ -917,6 +1016,7 @@ pub fn branch_curve<'a>(main_stem: &StemCurve, branch: &'a Branch, layout: &Scen
         current_extra_angle: branch.droop,
         segment_height_interval: main_stem.segment_height_interval,
         lean_sign: main_stem.lean_sign,
+        vine_base_lean_angle: main_stem.vine_base_lean_angle,
     }
 }
 
@@ -971,25 +1071,37 @@ pub fn leaf_transform_in_frame(curve: &StemCurve, leaf: &Leaf, shade_factor: f64
     let helio = layout.leaf_helio_max_angle * leaf.helio_angle as f32;
     let rotation = side_sign(leaf.side) * spread + helio + frame.angle;
 
-    // A just-budded leaf (maturity 0) still shows as a tiny bud rather than
-    // being invisible, then grows to full size as it unfurls. A heavily
-    // senesced one shrivels somewhat too, on top of (not instead of)
-    // whatever its maturity already contributed — the two never overlap in
-    // practice (senescence only ever starts well after a leaf has already
-    // fully matured — see `PlantConfig::leaf_mature_lifespan`), but if they
-    // ever did, "smaller" should win over "still growing," not average out.
+    let (scale, tint) = leaf_visual(leaf, shade_factor, layout);
+    Transform { offset: frame.offset, scale_x: scale, scale_y: scale, rotation, tint }
+}
+
+/// Scale/tint shared by every leaf placement function — maturity growth,
+/// senescence shrivel/color, and shade occlusion. See `leaf_transform_in_
+/// frame`'s own doc comment for why "smaller wins" rather than averaging
+/// maturity and shrivel together.
+fn leaf_visual(leaf: &Leaf, shade_factor: f64, layout: &SceneLayout) -> (f32, [f32; 3]) {
     let maturity = (leaf.maturity as f32).max(0.05);
     let shrivel = 1.0 - layout.leaf_shrivel_max_fraction * leaf.senescence as f32;
     let scale = layout.leaf_scale * maturity * shrivel;
     let occlusion = lerp(layout.leaf_occlusion_min_brightness, 1.0, shade_factor.clamp(0.0, 1.0) as f32);
     let base_tint = senescence_tint(leaf.senescence as f32, layout);
-    Transform {
-        offset: frame.offset,
-        scale_x: scale,
-        scale_y: scale,
-        rotation,
-        tint: [base_tint[0] * occlusion, base_tint[1] * occlusion, base_tint[2] * occlusion],
-    }
+    (scale, [base_tint[0] * occlusion, base_tint[1] * occlusion, base_tint[2] * occlusion])
+}
+
+/// `GrowthHabit::BasalRosette` leaf placement — no stem to walk (leaves
+/// attach directly at `base.offset`), fan spread widens with `leaf.age`
+/// (young leaves upright/central, older ones splayed outward) instead of
+/// the fixed left/right split an upright cane's leaves use.
+pub fn rosette_leaf_transform(base: Frame, leaf: &Leaf, shade_factor: f64, layout: &SceneLayout) -> Transform {
+    let age_t = ((leaf.age / layout.rosette_leaf_splay_age) as f32).clamp(0.0, 1.0);
+    let spread = lerp(layout.rosette_leaf_min_spread_angle, layout.rosette_leaf_max_spread_angle, age_t)
+        - layout.leaf_fold_max_angle * leaf.fold as f32
+        - layout.leaf_droop_max_angle * leaf.droop as f32;
+    let helio = layout.leaf_helio_max_angle * leaf.helio_angle as f32;
+    let rotation = side_sign(leaf.side) * spread + helio;
+
+    let (scale, tint) = leaf_visual(leaf, shade_factor, layout);
+    Transform { offset: base.offset, scale_x: scale, scale_y: scale, rotation, tint }
 }
 
 /// Green (healthy) → yellowing olive → brown, as `Leaf::senescence` rises —
@@ -1096,7 +1208,42 @@ mod tests {
             current_extra_angle: 0.0,
             segment_height_interval: 1.0,
             lean_sign: 1.0,
+            vine_base_lean_angle: 0.0,
         }
+    }
+
+    #[test]
+    fn moon_position_opposite_sun_mirrors_azimuth_and_elevation() {
+        let sun = SunState { elevation: 0.3, azimuth: 0.2, intensity: 1.0, color: [1.0, 1.0, 1.0] };
+        let moon = moon_position_opposite_sun(&sun);
+        assert!((moon.azimuth - 0.8).abs() < 1e-6);
+        assert!((moon.elevation - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn moon_position_opposite_sun_stays_within_the_same_valid_range_at_the_extremes() {
+        for (elevation, azimuth) in [(0.0, 0.0), (1.0, 1.0), (-1.0, 0.0), (0.5, 0.5)] {
+            let sun = SunState { elevation, azimuth, intensity: 1.0, color: [1.0, 1.0, 1.0] };
+            let moon = moon_position_opposite_sun(&sun);
+            assert!((0.0..=1.0).contains(&moon.elevation));
+            assert!((0.0..=1.0).contains(&moon.azimuth));
+        }
+    }
+
+    #[test]
+    fn daytime_fade_leaves_the_tint_untouched_at_night() {
+        let base = [1.0, 1.0, 1.0];
+        let ambient = [0.9, 0.7, 0.4];
+        assert_eq!(daytime_fade(base, ambient, 0.0, 0.85), base);
+    }
+
+    #[test]
+    fn daytime_fade_blends_toward_ambient_but_never_fully_at_full_sun() {
+        let base = [1.0, 1.0, 1.0];
+        let ambient = [0.0, 0.0, 0.0];
+        let faded = daytime_fade(base, ambient, 1.0, 0.85);
+        assert!((faded[0] - 0.15).abs() < 1e-6, "expected a 0.85 blend toward ambient, got {faded:?}");
+        assert!(faded[0] > 0.0, "should stay at least faintly distinct from the sky, not fully vanish");
     }
 
     #[test]
@@ -1106,6 +1253,7 @@ mod tests {
         let shadow = moon_shadow_transform(
             &sky_transform,
             &MoonAppearance { illuminated_fraction: 0.0, waxing: true },
+            0.0,
             &layout,
             1.0,
         );
@@ -1120,6 +1268,7 @@ mod tests {
         let shadow = moon_shadow_transform(
             &sky_transform,
             &MoonAppearance { illuminated_fraction: 1.0, waxing: true },
+            0.0,
             &layout,
             1.0,
         );
@@ -1138,12 +1287,14 @@ mod tests {
         let waxing = moon_shadow_transform(
             &sky_transform,
             &MoonAppearance { illuminated_fraction: 0.5, waxing: true },
+            0.0,
             &layout,
             1.0,
         );
         let waning = moon_shadow_transform(
             &sky_transform,
             &MoonAppearance { illuminated_fraction: 0.5, waxing: false },
+            0.0,
             &layout,
             1.0,
         );
@@ -1236,6 +1387,7 @@ mod tests {
             current_extra_angle: plant.stem_droop,
             segment_height_interval: 1.0,
             lean_sign: 1.0,
+            vine_base_lean_angle: 0.0,
         }
     }
 
@@ -1266,6 +1418,7 @@ mod tests {
             current_extra_angle: plant.stem_droop,
             segment_height_interval: 1.0,
             lean_sign: lean_sign_toward_window(layout.window_offset, layout.pot_anchor),
+            vine_base_lean_angle: 0.0,
         };
 
         let base_x = curve.base.offset[0];
@@ -1439,6 +1592,29 @@ mod tests {
     }
 
     #[test]
+    fn rosette_leaf_transform_anchors_at_base_regardless_of_attach_height() {
+        let layout = SceneLayout::default();
+        let base = Frame { offset: [0.1, -0.2], angle: 0.0 };
+        let mut leaf = test_leaf(Side::Left);
+        leaf.attach_height = 5.0;
+        let transform = rosette_leaf_transform(base, &leaf, 1.0, &layout);
+        assert_eq!(transform.offset, base.offset);
+    }
+
+    #[test]
+    fn rosette_leaf_transform_spread_widens_with_age() {
+        let layout = SceneLayout::default();
+        let base = Frame { offset: [0.0, 0.0], angle: 0.0 };
+        let mut young = test_leaf(Side::Left);
+        young.age = 0.0;
+        let mut old = test_leaf(Side::Left);
+        old.age = layout.rosette_leaf_splay_age;
+        let young_rotation = rosette_leaf_transform(base, &young, 1.0, &layout).rotation;
+        let old_rotation = rosette_leaf_transform(base, &old, 1.0, &layout).rotation;
+        assert!(old_rotation.abs() > young_rotation.abs(), "an older rosette leaf should splay out further than a young one");
+    }
+
+    #[test]
     fn trellis_transform_is_absent_for_a_freestanding_habit() {
         let layout = SceneLayout::default();
         assert!(trellis_transform(None, &layout).is_none());
@@ -1468,6 +1644,7 @@ mod tests {
             current_extra_angle: 0.0,
             segment_height_interval: 1.0,
             lean_sign: 1.0,
+            vine_base_lean_angle: 0.0,
         };
         let stem_tip = frame_at_height(&curve, trellis_height, &layout).offset;
         let trellis_top_y = transform.offset[1] + transform.scale_y * STEM_LOCAL_HEIGHT;
@@ -1488,6 +1665,7 @@ mod tests {
             current_extra_angle: 0.0,
             segment_height_interval: 1.0,
             lean_sign: 1.0,
+            vine_base_lean_angle: 0.0,
         };
         let root = AerialRoot { attach_height: 1.5 };
         let transform = aerial_root_transform(&root, &curve, &layout);
@@ -1505,6 +1683,7 @@ mod tests {
             current_extra_angle: 0.0,
             segment_height_interval: 1.0,
             lean_sign: 1.0,
+            vine_base_lean_angle: 0.0,
         };
         let root = AerialRoot { attach_height: 1.0 };
 
@@ -1703,6 +1882,17 @@ mod tests {
     }
 
     #[test]
+    fn outline_tint_for_sun_matches_the_configured_day_and_night_extremes() {
+        let layout = SceneLayout::default();
+        let night = outline_tint_for_sun(0.0, &layout);
+        let day = outline_tint_for_sun(1.0, &layout);
+        for i in 0..3 {
+            assert!((night[i] - layout.outline_tint_night[i]).abs() < 1e-5);
+            assert!((day[i] - layout.outline_tint_day[i]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
     fn room_and_pot_background_together_include_every_expected_piece_exactly_once() {
         let layout = SceneLayout::default();
         let meshes: Vec<&str> = room_background(&layout)
@@ -1710,7 +1900,7 @@ mod tests {
             .chain(pot_background(&layout).iter())
             .map(|s| s.mesh)
             .collect();
-        for expected in ["wall", "window_frame", "pot", "soil"] {
+        for expected in ["wall", "window_frame", "window_pane", "pot", "soil"] {
             assert_eq!(
                 meshes.iter().filter(|m| **m == expected).count(),
                 1,
@@ -1723,7 +1913,7 @@ mod tests {
     fn room_background_holds_only_the_wall_and_window_not_the_pot() {
         let layout = SceneLayout::default();
         let meshes: Vec<&str> = room_background(&layout).iter().map(|s| s.mesh).collect();
-        assert_eq!(meshes, vec!["wall", "window_frame"]);
+        assert_eq!(meshes, vec!["wall", "window_frame", "window_pane"]);
     }
 
     #[test]
@@ -1832,6 +2022,43 @@ mod tests {
     }
 
     #[test]
+    fn vine_base_lean_only_tilts_the_first_segment() {
+        let layout = SceneLayout::default();
+        let mut plant = Plant::new();
+        plant.height = 3.0;
+        let curve = StemCurve {
+            base: stem_base_frame(&layout),
+            segment_history: &plant.stem_segment_history,
+            current_lean_angle: plant.lean_angle,
+            current_extra_angle: plant.stem_droop,
+            segment_height_interval: 1.0,
+            lean_sign: 1.0,
+            vine_base_lean_angle: 0.4,
+        };
+        let segments = stem_segment_transforms(&curve, plant.height, plant.stem_radius, NO_TINT, &layout);
+        assert!((segments[0].rotation - 0.4).abs() < 1e-6, "first segment should carry the vine lean");
+        assert!((segments[1].rotation - 0.0).abs() < 1e-6, "later segments shouldn't inherit it");
+    }
+
+    #[test]
+    fn zero_vine_base_lean_leaves_the_stem_perfectly_straight() {
+        let layout = SceneLayout::default();
+        let mut plant = Plant::new();
+        plant.height = 2.0;
+        let curve = StemCurve {
+            base: stem_base_frame(&layout),
+            segment_history: &plant.stem_segment_history,
+            current_lean_angle: plant.lean_angle,
+            current_extra_angle: plant.stem_droop,
+            segment_height_interval: 1.0,
+            lean_sign: 1.0,
+            vine_base_lean_angle: 0.0,
+        };
+        let segments = stem_segment_transforms(&curve, plant.height, plant.stem_radius, NO_TINT, &layout);
+        assert!(segments.iter().all(|s| s.rotation == 0.0));
+    }
+
+    #[test]
     fn dynamic_zoom_for_room_with_no_plants_is_a_no_op_at_the_floor() {
         let layout = SceneLayout::default();
         let none: [&Plant; 0] = [];
@@ -1839,9 +2066,19 @@ mod tests {
     }
 
     #[test]
+    fn seed_transform_swells_toward_full_scale_as_the_fraction_rises() {
+        let layout = SceneLayout::default();
+        let dry = seed_transform(&layout, 0.0);
+        let swollen = seed_transform(&layout, 1.0);
+        assert!((dry.scale_x - layout.seed_scale * layout.seed_min_swell_scale_fraction).abs() < 1e-6);
+        assert!((swollen.scale_x - layout.seed_scale).abs() < 1e-6);
+        assert!(swollen.scale_x > dry.scale_x);
+    }
+
+    #[test]
     fn seed_and_stem_and_branch_transforms_sit_at_their_shared_anchor() {
         let layout = SceneLayout::default();
-        assert_eq!(seed_transform(&layout).offset, layout.pot_anchor);
+        assert_eq!(seed_transform(&layout, 1.0).offset, layout.pot_anchor);
 
         let mut plant = Plant::new();
         plant.height = 2.0;
@@ -1853,6 +2090,7 @@ mod tests {
             current_extra_angle: plant.stem_droop,
             segment_height_interval: 10.0, // taller than plant.height: renders as one segment
             lean_sign: 1.0,
+            vine_base_lean_angle: 0.0,
         };
         let segments = stem_segment_transforms(&main_curve, plant.height, plant.stem_radius, NO_TINT, &layout);
         assert_eq!(segments.len(), 1, "expected one segment covering the whole (still-growing) stem");
@@ -1981,19 +2219,19 @@ mod tests {
             tint: [0.2, 0.6, 0.2],
         };
         let base = InstanceUniform::from_transform(&transform, 1.5, 1.0, 0.5);
-        let outline = outline_uniform(&transform, 1.5, 1.0, (10.0, 10.0), &layout, 800.0, 0.5, layout.outline_tint);
+        let outline = outline_uniform(&transform, 1.5, 1.0, (10.0, 10.0), &layout, 800.0, 0.5, layout.outline_tint_day);
         assert!(outline.scale[0] > base.scale[0], "outline should be larger than the base mesh in x");
         assert!(outline.scale[1] > base.scale[1], "outline should be larger than the base mesh in y");
         assert_eq!(outline.offset, base.offset, "outline shares the same center as the base mesh");
-        assert_eq!(outline.tint, layout.outline_tint, "outline discards the mesh's own tint entirely");
+        assert_eq!(outline.tint, layout.outline_tint_day, "outline discards the mesh's own tint entirely");
     }
 
     #[test]
     fn outline_uniform_margin_shrinks_as_the_canvas_gets_wider() {
         let layout = SceneLayout::default();
         let transform = Transform { offset: [0.0, 0.0], scale_x: 0.3, scale_y: 0.3, rotation: 0.0, tint: NO_TINT };
-        let narrow = outline_uniform(&transform, 1.0, 1.0, (10.0, 10.0), &layout, 400.0, 0.5, layout.outline_tint);
-        let wide = outline_uniform(&transform, 1.0, 1.0, (10.0, 10.0), &layout, 1600.0, 0.5, layout.outline_tint);
+        let narrow = outline_uniform(&transform, 1.0, 1.0, (10.0, 10.0), &layout, 400.0, 0.5, layout.outline_tint_day);
+        let wide = outline_uniform(&transform, 1.0, 1.0, (10.0, 10.0), &layout, 1600.0, 0.5, layout.outline_tint_day);
         let narrow_margin = narrow.scale[0] - 0.3;
         let wide_margin = wide.scale[0] - 0.3;
         assert!(narrow_margin > wide_margin, "a narrower canvas needs a bigger scale delta for the same pixel width");
@@ -2004,8 +2242,8 @@ mod tests {
     fn outline_uniform_margin_shrinks_as_the_mesh_local_extent_grows() {
         let layout = SceneLayout::default();
         let transform = Transform { offset: [0.0, 0.0], scale_x: 0.3, scale_y: 0.3, rotation: 0.0, tint: NO_TINT };
-        let small_mesh = outline_uniform(&transform, 1.0, 1.0, (5.0, 5.0), &layout, 800.0, 0.5, layout.outline_tint);
-        let big_mesh = outline_uniform(&transform, 1.0, 1.0, (50.0, 50.0), &layout, 800.0, 0.5, layout.outline_tint);
+        let small_mesh = outline_uniform(&transform, 1.0, 1.0, (5.0, 5.0), &layout, 800.0, 0.5, layout.outline_tint_day);
+        let big_mesh = outline_uniform(&transform, 1.0, 1.0, (50.0, 50.0), &layout, 800.0, 0.5, layout.outline_tint_day);
         assert!(
             small_mesh.scale[0] - 0.3 > big_mesh.scale[0] - 0.3,
             "a mesh with a smaller native extent needs a bigger scale delta for the same on-screen pixel width"
@@ -2020,7 +2258,7 @@ mod tests {
         // margin on both the way a single shared radius would produce.
         let layout = SceneLayout::default();
         let transform = Transform { offset: [0.0, 0.0], scale_x: 0.3, scale_y: 0.3, rotation: 0.0, tint: NO_TINT };
-        let long_thin = outline_uniform(&transform, 1.0, 1.0, (5.0, 60.0), &layout, 800.0, 0.5, layout.outline_tint);
+        let long_thin = outline_uniform(&transform, 1.0, 1.0, (5.0, 60.0), &layout, 800.0, 0.5, layout.outline_tint_day);
         let margin_x = long_thin.scale[0] - 0.3;
         let margin_y = long_thin.scale[1] - 0.3;
         assert!(margin_x > margin_y, "the short axis (small local extent) should get the bigger margin");
@@ -2030,7 +2268,7 @@ mod tests {
     fn outline_uniform_is_a_no_op_scale_change_for_a_zero_extent_mesh() {
         let layout = SceneLayout::default();
         let transform = Transform { offset: [0.0, 0.0], scale_x: 0.3, scale_y: 0.3, rotation: 0.0, tint: NO_TINT };
-        let outline = outline_uniform(&transform, 1.0, 1.0, (0.0, 0.0), &layout, 800.0, 0.5, layout.outline_tint);
+        let outline = outline_uniform(&transform, 1.0, 1.0, (0.0, 0.0), &layout, 800.0, 0.5, layout.outline_tint_day);
         assert_eq!(outline.scale, [0.3, 0.3], "no extent to divide by, so no margin can be computed");
     }
 
@@ -2038,7 +2276,7 @@ mod tests {
     fn outline_uniform_sits_farther_away_than_its_own_paired_normal() {
         let layout = SceneLayout::default();
         let transform = Transform { offset: [0.0, 0.0], scale_x: 0.3, scale_y: 0.3, rotation: 0.0, tint: NO_TINT };
-        let outline = outline_uniform(&transform, 1.0, 1.0, (10.0, 10.0), &layout, 800.0, 0.4, layout.outline_tint);
+        let outline = outline_uniform(&transform, 1.0, 1.0, (10.0, 10.0), &layout, 800.0, 0.4, layout.outline_tint_day);
         assert!((outline.depth - (0.4 + layout.outline_depth_bias)).abs() < 1e-6);
     }
 
@@ -2170,11 +2408,11 @@ mod tests {
     }
 
     #[test]
-    fn scene_light_uniform_scales_position_by_zoom_like_every_other_offset() {
+    fn scene_light_uniform_scales_position_by_zoom_and_pan_like_every_other_offset() {
         let layout = SceneLayout::default();
         let sun = SunState { elevation: 1.0, azimuth: 0.5, intensity: 0.8, color: [1.0, 0.9, 0.7] };
-        let light = SceneLightUniform::new(&sun, &layout, 0.5, None);
-        assert_eq!(light.pos, [layout.window_offset[0] * 0.5, layout.window_offset[1] * 0.5]);
+        let light = SceneLightUniform::new(&sun, &layout, 0.5, [0.1, -0.05], None);
+        assert_eq!(light.pos, [layout.window_offset[0] * 0.5 + 0.1, layout.window_offset[1] * 0.5 - 0.05]);
         assert_eq!(light.intensity, 0.8);
         assert_eq!(light.color, [1.0, 0.9, 0.7]);
         assert_eq!(light.ambient_floor, layout.night_ambient_color);
@@ -2184,17 +2422,37 @@ mod tests {
     fn scene_light_uniform_cursor_is_off_when_the_pointer_is_not_over_the_canvas() {
         let layout = SceneLayout::default();
         let sun = SunState { elevation: 1.0, azimuth: 0.5, intensity: 0.8, color: [1.0, 0.9, 0.7] };
-        let light = SceneLightUniform::new(&sun, &layout, 1.0, None);
+        let light = SceneLightUniform::new(&sun, &layout, 1.0, [0.0, 0.0], None);
         assert_eq!(light.cursor_intensity, 0.0);
     }
 
     #[test]
-    fn scene_light_uniform_cursor_position_is_not_zoom_scaled_unlike_the_window_light() {
+    fn scene_light_uniform_cursor_position_is_not_zoom_or_pan_adjusted_unlike_the_window_light() {
         let layout = SceneLayout::default();
         let sun = SunState { elevation: 1.0, azimuth: 0.5, intensity: 0.8, color: [1.0, 0.9, 0.7] };
-        let light = SceneLightUniform::new(&sun, &layout, 0.5, Some([0.3, -0.2]));
-        assert_eq!(light.cursor_pos, [0.3, -0.2], "cursor is screen-space, zoom shouldn't move it");
+        let light = SceneLightUniform::new(&sun, &layout, 0.5, [0.2, 0.2], Some([0.3, -0.2]));
+        assert_eq!(light.cursor_pos, [0.3, -0.2], "cursor is screen-space, zoom/pan shouldn't move it");
         assert_eq!(light.cursor_intensity, layout.cursor_light_intensity);
+    }
+
+    #[test]
+    fn scene_light_uniform_lamp_is_off_by_day_and_on_at_night() {
+        let layout = SceneLayout::default();
+        let day = SunState { elevation: 1.0, azimuth: 0.5, intensity: 1.0, color: [1.0, 1.0, 1.0] };
+        let night = SunState { elevation: -0.5, azimuth: 1.0, intensity: 0.0, color: [1.0, 1.0, 1.0] };
+        let day_light = SceneLightUniform::new(&day, &layout, 0.5, [0.0, 0.0], None);
+        let night_light = SceneLightUniform::new(&night, &layout, 0.5, [0.0, 0.0], None);
+        assert_eq!(day_light.lamp_intensity, 0.0);
+        assert_eq!(night_light.lamp_intensity, layout.lamp_intensity_max);
+        assert_eq!(night_light.lamp_pos, [layout.lamp_offset[0] * 0.5, layout.lamp_offset[1] * 0.5]);
+        assert_eq!(night_light.lamp_falloff, layout.lamp_falloff);
+    }
+
+    #[test]
+    fn lamp_on_fraction_matches_the_darkness_of_the_sun() {
+        assert_eq!(lamp_on_fraction(1.0), 0.0);
+        assert_eq!(lamp_on_fraction(0.0), 1.0);
+        assert!((lamp_on_fraction(0.7) - 0.3).abs() < 1e-6);
     }
 
     #[test]

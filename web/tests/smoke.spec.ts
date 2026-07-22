@@ -14,6 +14,15 @@ function collectConsoleErrors(page: Page): string[] {
   return errors;
 }
 
+async function addFirstPlant(page: Page) {
+  await page.getByRole("button", { name: "Add plant" }).click();
+  await expect(page.getByText(/Seed|Sprout|Vegetative/)).toBeVisible({ timeout: 2_000 });
+}
+
+async function openSettings(page: Page) {
+  await page.getByRole("button", { name: "⚙️ Settings" }).click();
+}
+
 // Regression test for a real incident: a WGSL shader change (the cursor
 // specular highlight) started reading `instance.*` fields from the
 // fragment stage, but the group(0) bind group layout was still declared
@@ -43,6 +52,7 @@ test("the canvas renders real (non-blank) content, not just a solid clear color"
 
   await page.goto("/");
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
   // A few real frames, not just the first one — some effects (the cursor
   // light/specular, the pick pass) only run once the loop has been going a
   // moment.
@@ -68,15 +78,43 @@ test("loads the page and the wasm engine without erroring", async ({ page }) => 
   expect(errors).toEqual([]);
 });
 
-test("the HUD reflects live engine state once it starts running", async ({ page }) => {
+test("the room starts with no plant until one is added", async ({ page }) => {
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "Add plant" })).toBeVisible();
+  await expect(page.getByText(/Seed|Sprout|Vegetative/)).not.toBeVisible();
+
+  await addFirstPlant(page);
+  await expect(page.getByRole("button", { name: "Add plant" })).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+test("the starting inventory is spent as plants are added", async ({ page }) => {
   const errors = collectConsoleErrors(page);
 
   await page.goto("/");
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
 
-  // Stage starts at "Seed" and the HUD polls every 250ms — this should
-  // appear well within a couple of poll cycles.
-  await expect(page.getByText(/Seed|Sprout|Vegetative/)).toBeVisible({ timeout: 2_000 });
+  const addButton = page.getByRole("button", { name: "Add plant" });
+  await addButton.click();
+  await addButton.click();
+  await addButton.click();
+  await expect(addButton).not.toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+test("the HUD reflects live engine state once it starts running", async ({ page }) => {
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
+
   await expect(page.getByText(/Height: \d/)).toBeVisible();
   await expect(page.getByText(/Leaves: \d+ · Branches: \d+/)).toBeVisible();
   await expect(page.getByText(/💧 Water: \d+%/)).toBeVisible();
@@ -90,6 +128,8 @@ test("the water button and time-scale slider don't error when used", async ({ pa
 
   await page.goto("/");
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
 
   await page.getByRole("button", { name: "Water" }).click();
   const slider = page.getByLabel(/Speed:/);
@@ -109,6 +149,8 @@ test("the auto-water toggle enables without erroring and disables the manual but
 
   await page.goto("/");
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
 
   const autoWaterCheckbox = page.getByLabel("Auto-water");
   const waterButton = page.getByRole("button", { name: "Water" });
@@ -137,6 +179,8 @@ test("a default no-input session grows past the first leaf (real browser/wasm lo
 
   await page.goto("/");
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
 
   // Speed up sim time so this doesn't need a full real minute of wall-clock
   // waiting — 5x is the slider's own max.
@@ -157,7 +201,8 @@ test("switching species resets the HUD and doesn't error", async ({ page }) => {
 
   await page.goto("/");
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByText(/Seed|Sprout|Vegetative/)).toBeVisible({ timeout: 2_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
 
   const speciesSelect = page.getByLabel("Species:");
   await speciesSelect.selectOption("peace_lily");
@@ -168,6 +213,28 @@ test("switching species resets the HUD and doesn't error", async ({ page }) => {
   await expect(page.getByText(/Branches: 0/)).toBeVisible({ timeout: 2_000 });
 
   await page.waitForTimeout(500);
+  expect(errors).toEqual([]);
+});
+
+test("the prune and trim tools are independently selectable", async ({ page }) => {
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
+
+  const slider = page.getByLabel(/Speed:/);
+  await slider.fill("5");
+
+  const pruneButton = page.getByRole("button", { name: "🔪 Prune" });
+  const trimButton = page.getByRole("button", { name: "✂️ Trim" });
+  await expect(pruneButton).toBeVisible();
+  await expect(trimButton).toBeVisible({ timeout: 15_000 });
+
+  await trimButton.click();
+  await pruneButton.click();
+
   expect(errors).toEqual([]);
 });
 
@@ -184,11 +251,13 @@ test("the moon's phase keeps advancing across a species switch instead of resett
 
   await page.goto("/");
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
 
   await page.getByRole("button", { name: "🌱 Seed info" }).click();
   const moonReading = page.getByText(/Moon: \d+% lit/);
   await expect(moonReading).toBeVisible();
 
+  await openSettings(page);
   const slider = page.getByLabel(/Speed:/);
   await slider.fill("5");
   await page.waitForTimeout(2_000);
@@ -214,6 +283,45 @@ test("the moon's phase keeps advancing across a species switch instead of resett
     afterSwitch,
     `moon reading went from ${beforeSwitch}% to ${afterSwitch}% across a species switch — it should only ever move forward`,
   ).toBeGreaterThanOrEqual(beforeSwitch!);
+
+  expect(errors).toEqual([]);
+});
+
+// Regression test for a user report that the moon "looks stuck" on one
+// phase. A moon-phase snapshot alone can't tell whether it's genuinely
+// frozen or just slow near a flat point of the illumination curve, so this
+// watches the same "Moon: X% lit" reading move over a real accelerated
+// window instead of inferring anything from the underlying math.
+test("the moon's illuminated-fraction reading visibly changes over a short accelerated window", async ({ page }) => {
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+
+  await page.getByRole("button", { name: "🌱 Seed info" }).click();
+  const moonReading = page.getByText(/Moon: \d+% lit/);
+  await expect(moonReading).toBeVisible();
+
+  await openSettings(page);
+  const slider = page.getByLabel(/Speed:/);
+  await slider.fill("5");
+
+  const readMoonPercent = async () => {
+    const text = await moonReading.textContent();
+    const match = text?.match(/Moon: (\d+)% lit/);
+    return match ? Number(match[1]) : null;
+  };
+
+  const before = await readMoonPercent();
+  expect(before, `couldn't read the moon reading from "${await moonReading.textContent()}"`).not.toBeNull();
+
+  await page.waitForTimeout(6_000);
+
+  const after = await readMoonPercent();
+  expect(after, `couldn't read the moon reading from "${await moonReading.textContent()}"`).not.toBeNull();
+
+  expect(after, `moon reading stayed at ${before}% lit over 6s at 5x speed — expected it to visibly move`).not.toBe(before);
 
   expect(errors).toEqual([]);
 });
