@@ -1,6 +1,6 @@
 # plant
 
-msartintarm.github.io/plant
+[msartintarm.github.io/plant](https://msartintarm.github.io/plant)
 
 A houseplant growth simulation: a sprout grows into a plant, moving and
 reorienting its leaves toward sunlight from a window over an accelerated
