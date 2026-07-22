@@ -1,5 +1,7 @@
 # plant
 
+msartintarm.github.io/plant
+
 A houseplant growth simulation: a sprout grows into a plant, moving and
 reorienting its leaves toward sunlight from a window over an accelerated
 day/night cycle. Rendered in 2D side-profile.
