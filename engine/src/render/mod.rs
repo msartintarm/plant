@@ -186,22 +186,35 @@ mod wgpu_engine {
     /// Writes the GPU hit-testing `Drawable` for one leaf or stem segment —
     /// see `pick_pipeline`'s own doc comment. Same transform/depth as the
     /// real draw (so the pick pass's depth test against the already-
-    /// populated depth buffer resolves occlusion identically), but tinted
-    /// with its flat target-ID color instead of a real color, and through
-    /// the plain (non-hover-enlarged) transform — the pickable *hitbox*
-    /// stays the normal size regardless of whether it's currently the
-    /// hovered one, only its *look* grows (see `scene::apply_hover_scale`).
+    /// populated depth buffer resolves occlusion identically), tinted with
+    /// its flat target-ID color instead of a real color, and — like
+    /// `write_outline_transform` — grown by `scene::outline_scale_margin`
+    /// on top of whatever `transform` already is, so the clickable hitbox
+    /// extends all the way to the visible outline halo's own edge (white
+    /// while idle, `SceneLayout::hover_outline_tint`'s red once hovered —
+    /// `transform` should already be `scene::apply_hover_scale`d when this
+    /// target is the current `hovered_target`, the same `display_transform`
+    /// passed to the real draw/outline, so the hitbox and the highlight
+    /// grow together instead of the hitbox staying pinned at the plain
+    /// mesh's own smaller, now visually-inaccurate edge).
     fn write_pick_transform(
         queue: &wgpu::Queue,
+        meshes: &meshes::MeshRegistry,
         drawable: &Drawable,
         transform: &Transform,
         aspect: f32,
         zoom: f32,
+        canvas_width_px: f32,
         depth: f32,
+        layout: &SceneLayout,
         target: scene::PickTarget,
     ) {
         let id_tint = Transform { tint: scene::encode_pick_target(target), ..*transform };
-        let uniform = InstanceUniform::from_transform(&id_tint, aspect, zoom, depth);
+        let mut uniform = InstanceUniform::from_transform(&id_tint, aspect, zoom, depth);
+        let local_half_extent = meshes.local_half_extent(drawable.mesh);
+        let margin = scene::outline_scale_margin(local_half_extent, aspect, canvas_width_px, layout);
+        uniform.scale[0] += margin[0];
+        uniform.scale[1] += margin[1];
         queue.write_buffer(&drawable.uniform_buffer, 0, bytes_of(&uniform));
     }
 
@@ -549,6 +562,7 @@ mod wgpu_engine {
         /// like the sky drawables above, always drawn (its own tint reads
         /// as "off" by day).
         lamp_drawable: Drawable,
+        table_drawable: Drawable,
 
         /// The wall/window pane — see `scene::room_background`. Built once
         /// (unlike `PlantSlot::background_specs`/`background_drawables`,
@@ -595,7 +609,7 @@ mod wgpu_engine {
         /// tool`) — Prune only ever picks leaves, Trim only ever picks stem
         /// segments, so a click always acts on the tool the player actually
         /// chose rather than whichever happened to be nearest the cursor.
-        active_tool: Tool,
+        active_tool: Option<Tool>,
         /// Guards against issuing a second pick readback while one is
         /// already in flight — `map_async`'s callback flips this back to
         /// `false` once it resolves. Shared for the same reason `hovered_
@@ -981,6 +995,10 @@ mod wgpu_engine {
             let moon_shadow_drawable =
                 make_sky_drawable("moon", &scene::sky_object_transform(&initial_sun, layout, aspect));
             let lamp_drawable = make_sky_drawable("wall_lamp", &scene::lamp_transform(layout));
+            let table_drawable = make_sky_drawable(
+                "table",
+                &Transform { offset: [0.0, 0.0], scale_x: 0.0, scale_y: 0.0, rotation: 0.0, tint: [1.0, 1.0, 1.0] },
+            );
 
             let room_background_specs = scene::room_background(layout);
             let room_background_drawables =
@@ -1001,6 +1019,7 @@ mod wgpu_engine {
                 moon_drawable,
                 moon_shadow_drawable,
                 lamp_drawable,
+                table_drawable,
                 room_background_specs,
                 room_background_drawables,
                 plants: Vec::new(),
@@ -1010,7 +1029,7 @@ mod wgpu_engine {
                 pick_view,
                 pick_readback_buffer,
                 hovered_target: Rc::new(Cell::new(None)),
-                active_tool: Tool::Prune,
+                active_tool: None,
                 pick_pending: Rc::new(Cell::new(false)),
                 pointer_pixel: None,
                 camera_pan: [0.0, 0.0],
@@ -1021,10 +1040,7 @@ mod wgpu_engine {
                 day_progress: 0.0,
                 session_time: 0.0,
                 last_timestamp: None,
-                inventory: ["dracaena", "peace_lily", "pothos"]
-                    .into_iter()
-                    .map(|species_name| InventoryItem { species_name: species_name.to_string(), from_seed: true })
-                    .collect(),
+                inventory: vec![InventoryItem { species_name: "dracaena".to_string(), from_seed: true }],
             })
         }
 
@@ -1110,7 +1126,11 @@ mod wgpu_engine {
             // level rendering reads room-level state" rule `SceneLightUniform`
             // below already follows for light (misting affects the whole
             // room's air, not wherever one specific pot happens to sit).
-            self.humidity.update(sim_dt, climate_state.temperature_c, &self.growth_config.humidity);
+            self.humidity.update(
+                time.physiology_dt(sim_dt),
+                climate_state.temperature_c,
+                &self.growth_config.humidity,
+            );
             // Every plant in the room keeps growing every frame, not just
             // whichever one is currently selected/rendered below — "several
             // simultaneously alive plants" is the whole point of holding
@@ -1287,21 +1307,28 @@ mod wgpu_engine {
             ];
             write_transform(&self.queue, &self.lamp_drawable, &lamp_transform, aspect, zoom, self.scene_layout.background_depth, &self.scene_layout);
 
+            let pot_half_height = self.meshes.local_half_extent("pot").1 * self.scene_layout.pot_scale;
+            let table_top_y = self.scene_layout.pot_anchor[1] - pot_half_height;
+            let table_transform = Transform {
+                offset: [pan[0], table_top_y + pan[1]],
+                scale_x: self.scene_layout.table_scale,
+                scale_y: self.scene_layout.table_scale,
+                rotation: 0.0,
+                tint: [1.0, 1.0, 1.0],
+            };
+            write_transform(&self.queue, &self.table_drawable, &table_transform, aspect, zoom, self.scene_layout.background_depth, &self.scene_layout);
+
             for (plant_index, slot) in self.plants.iter_mut().enumerate() {
                 // Where this plant's own pot actually sits this frame —
-                // `plant_slot_base_anchor` steps each additional plant
-                // sideways along the sill (see its own doc comment), and
-                // `pot_anchor_for_position` then layers this specific
-                // plant's own `Simulation::set_pot_position` slider on top
-                // of that base. `position == 0.5` reproduces the slot's own
-                // base anchor exactly, so this is a pure addition, not a
-                // retuning.
-                let slot_base_anchor = scene::plant_slot_base_anchor(&self.scene_layout, plant_index);
-                let unpanned_pot_anchor = scene::pot_anchor_for_position(
-                    slot_base_anchor,
-                    slot.pot_position,
-                    self.scene_layout.pot_position_x_travel,
-                );
+                // `plant_pot_world_anchor` combines this slot's sideways step
+                // along the sill with this specific plant's own `Simulation::
+                // set_pot_position` slider (see its own doc comment).
+                // `position == 0.5` reproduces the slot's own base anchor
+                // exactly, so this is a pure addition, not a retuning. Also
+                // the single source of truth `Simulation::plant_pot_hud`
+                // projects into CSS-pixel space for the per-pot water gauge.
+                let unpanned_pot_anchor =
+                    scene::plant_pot_world_anchor(&self.scene_layout, plant_index, slot.pot_position);
                 let effective_pot_anchor = [unpanned_pot_anchor[0] + pan[0], unpanned_pot_anchor[1] + pan[1]];
                 let effective_layout = SceneLayout { pot_anchor: effective_pot_anchor, ..self.scene_layout };
                 let layout = &effective_layout;
@@ -1501,11 +1528,14 @@ mod wgpu_engine {
                     );
                     write_pick_transform(
                         &self.queue,
+                        &self.meshes,
                         &slot.stem_segment_pick_drawables[segment_slot],
-                        transform,
+                        &display_transform,
                         aspect,
                         zoom,
+                        canvas_width_px,
                         layout.plant_depth,
+                        layout,
                         scene::PickTarget::StemSegment { plant_index, slot: segment_slot },
                     );
                     slot.stem_segment_targets.push((None, base_height));
@@ -1543,14 +1573,20 @@ mod wgpu_engine {
                 // name`) — cheap, since `Drawable::mesh` is just a lookup
                 // key, not an owned GPU resource, so switching species at
                 // runtime (`set_species`) never needs a new buffer. Always
-                // drawn (see the render pass below) — `bloom_intensity`
-                // already scales it to zero size whenever the plant isn't
-                // currently in bloom, so a separate height-threshold check
-                // here would only duplicate that.
+                // drawn (see the render pass below) — `flower_transform`
+                // itself scales it to exactly zero size pre-maturity, and to
+                // its own `SceneLayout::bud_min_intensity` floor (not zero)
+                // once mature but currently resting between bloom flushes.
                 slot.flower_drawable.mesh = slot.plant_config.flower_mesh_name;
                 slot.flower_outline_drawable.mesh = slot.plant_config.flower_mesh_name;
-                let flower_transform =
-                    scene::flower_transform(&main_curve, slot.plant.height, slot.plant.bloom_intensity, layout);
+                let mature_enough_to_have_a_bud = slot.plant.height >= slot.plant_config.flowering_height_threshold;
+                let flower_transform = scene::flower_transform(
+                    &main_curve,
+                    slot.plant.height,
+                    slot.plant.bloom_intensity,
+                    mature_enough_to_have_a_bud,
+                    layout,
+                );
                 write_transform(&self.queue, &slot.flower_drawable, &flower_transform, aspect, zoom, layout.plant_depth, layout);
                 write_outline_transform(
                     &self.queue,
@@ -1613,11 +1649,14 @@ mod wgpu_engine {
                     );
                     write_pick_transform(
                         &self.queue,
+                        &self.meshes,
                         &slot.leaf_pick_drawables[leaf_slot],
-                        &transform,
+                        &display_transform,
                         aspect,
                         zoom,
+                        canvas_width_px,
                         depth,
+                        layout,
                         scene::PickTarget::Leaf { plant_index, slot: leaf_slot },
                     );
                     leaf_slot += 1;
@@ -1658,11 +1697,14 @@ mod wgpu_engine {
                         );
                         write_pick_transform(
                             &self.queue,
+                            &self.meshes,
                             &slot.stem_segment_pick_drawables[segment_slot],
-                            transform,
+                            &display_transform,
                             aspect,
                             zoom,
+                            canvas_width_px,
                             layout.plant_depth,
+                            layout,
                             scene::PickTarget::StemSegment { plant_index, slot: segment_slot },
                         );
                         slot.stem_segment_targets.push((Some(i), base_height));
@@ -1706,11 +1748,14 @@ mod wgpu_engine {
                         );
                         write_pick_transform(
                             &self.queue,
+                            &self.meshes,
                             &slot.leaf_pick_drawables[leaf_slot],
-                            &leaf_transform,
+                            &display_transform,
                             aspect,
                             zoom,
+                            canvas_width_px,
                             depth,
+                            layout,
                             scene::PickTarget::Leaf { plant_index, slot: leaf_slot },
                         );
                         leaf_slot += 1;
@@ -1796,6 +1841,7 @@ mod wgpu_engine {
                     draw(d);
                 }
                 draw(&self.lamp_drawable);
+                draw(&self.table_drawable);
                 // Each drawn independently by its own elevation (phase-
                 // linked, see `moon::arc_position`) — both up (daytime
                 // moon) or neither (moonless night near new moon) are both
@@ -1870,7 +1916,7 @@ mod wgpu_engine {
             // `pick_pending`), so this never queues up more than one
             // in-flight request.
             let mut just_requested_pick = false;
-            if let Some((css_x, css_y)) = self.pointer_pixel {
+            if let (Some((css_x, css_y)), Some(active_tool)) = (self.pointer_pixel, self.active_tool) {
                 if !self.pick_pending.get() {
                     let px = ((css_x * self.device_pixel_ratio).round() as i32)
                         .clamp(0, self.config.width as i32 - 1) as u32;
@@ -1891,15 +1937,27 @@ mod wgpu_engine {
                                     store: wgpu::StoreOp::Store,
                                 },
                             })],
-                            // `Load`, not `Clear` — reuses the depth buffer
-                            // the main pass above just populated this same
-                            // frame, so leaves hidden behind the stem or a
-                            // nearer leaf correctly never win the pick (see
-                            // `pick_pipeline`'s doc comment).
+                            // Prune reuses (`Load`s) the depth buffer the
+                            // main pass above just populated this same
+                            // frame, so a leaf actually hidden behind the
+                            // opaque stem correctly never wins the pick (see
+                            // `pick_pipeline`'s doc comment). Trim instead
+                            // gets a fresh (`Clear`d) depth buffer: it only
+                            // ever draws stem-segment pick geometry (see the
+                            // `match self.active_tool` below), so reusing
+                            // the main buffer would let a leaf drawn in
+                            // front of a stem — real geometry Trim doesn't
+                            // even consider a pick candidate — block picking
+                            // that stem anyway, even though the player can
+                            // still see (and mean to click) the stem right
+                            // through/behind it.
                             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                                 view: &self.depth_view,
                                 depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
+                                    load: match active_tool {
+                                        Tool::Prune => wgpu::LoadOp::Load,
+                                        Tool::Trim => wgpu::LoadOp::Clear(1.0),
+                                    },
                                     store: wgpu::StoreOp::Discard,
                                 }),
                                 stencil_ops: None,
@@ -1935,7 +1993,7 @@ mod wgpu_engine {
                         // actually selected, never whichever geometry
                         // happens to be nearest the cursor.
                         for slot in &self.plants {
-                            match self.active_tool {
+                            match active_tool {
                                 Tool::Prune => {
                                     for i in 0..slot.leaves_drawn {
                                         draw_pick(&slot.leaf_pick_drawables[i]);
@@ -1970,7 +2028,6 @@ mod wgpu_engine {
                     just_requested_pick = true;
                 }
             } else {
-                // Pointer's left the canvas entirely — nothing to hover.
                 self.hovered_target.set(None);
             }
 
@@ -2094,6 +2151,61 @@ mod wgpu_engine {
         /// fixes), so restarting/switching species never moves this
         /// backward.
         pub moon_illuminated_fraction: f64,
+        /// Tallest `height` this plant has ever reached — see `Plant::
+        /// max_height_reached`. A scoring metric: survives `height` itself
+        /// dropping back down from a prune or cutting.
+        pub max_height_reached: f64,
+        /// Highest concurrent leaf count (main stem + every branch) this
+        /// plant has ever held at once — see `Plant::max_leaves_at_once`. A
+        /// scoring metric, distinct from `leaf_count`'s current reading.
+        pub max_leaves_at_once: u32,
+        /// Cumulative leaves ever spawned over this plant's life, including
+        /// ones since shed or pruned — see `Plant::leaves_produced_total`.
+        /// A scoring metric, distinct from `leaf_count`'s current reading.
+        pub leaves_produced_total: u32,
+        /// Sim-seconds this plant has spent alive — see `Plant::
+        /// alive_duration`. A scoring metric: freezes once `stage` reads
+        /// `"Dead"`, unlike `days_elapsed` (which is room-level session
+        /// time, not this plant's own lifespan).
+        pub alive_duration: f64,
+        /// `alive_duration` converted to whole/fractional plant-days (same
+        /// `TimeConfig::day_length_sim_seconds` divisor `days_elapsed` uses)
+        /// — a UI-ready "how many days has it lived" reading so the HUD
+        /// doesn't need its own copy of that constant to format
+        /// `alive_duration` sensibly.
+        pub alive_days: f64,
+        pub bloom_intensity: f64,
+    }
+
+    /// A per-pot overlay reading for one plant — see `Simulation::
+    /// plant_pot_hud`. Every plant renders simultaneously (see `render`'s
+    /// own doc comment), so unlike `Stats` (which only ever describes the
+    /// *selected* plant) a UI wanting a small water gauge/button under
+    /// *each* pot needs one of these per plant, not just one shared reading.
+    #[wasm_bindgen(getter_with_clone)]
+    pub struct PlantPotHud {
+        /// This plant's pot anchor projected into canvas CSS pixels (see
+        /// `scene::plant_pot_world_anchor`) — where a UI element should be
+        /// centered/anchored to sit right at this specific pot, accounting
+        /// for the room's current zoom, camera pan, and this plant's own
+        /// `pot_position` slider.
+        pub x: f32,
+        pub y: f32,
+        /// 0.0 (bone dry) ..= 1.0 (fully watered) — same reading as
+        /// `Stats::water_level`, just for a specific plant regardless of
+        /// which one is currently selected.
+        pub water_level: f64,
+        /// Whether this plant's own self-watering mode is on — a per-pot
+        /// water button should stay disabled while this is true, the same
+        /// as the settings HUD's own Water button already does.
+        pub auto_water_enabled: bool,
+        pub is_dead: bool,
+    }
+
+    #[wasm_bindgen(getter_with_clone)]
+    pub struct ScreenPosition {
+        pub x: f32,
+        pub y: f32,
     }
 
     #[wasm_bindgen]
@@ -2166,6 +2278,18 @@ mod wgpu_engine {
             let mut state = self.inner.borrow_mut();
             let selected = state.selected_plant_index;
             let Some(slot) = state.plants.get_mut(selected) else { return };
+            slot.soil.water(amount);
+        }
+
+        /// Like `water`, but targets a specific plant by index regardless of
+        /// which one is currently selected — for the per-pot water button
+        /// (drawn under every pot at once, see `plant_pot_hud`), which
+        /// shouldn't also switch the settings HUD's own selection just
+        /// because the player watered a plant they weren't already looking
+        /// at. A no-op if `index` is out of range.
+        pub fn water_plant(&self, index: u32, amount: f64) {
+            let mut state = self.inner.borrow_mut();
+            let Some(slot) = state.plants.get_mut(index as usize) else { return };
             slot.soil.water(amount);
         }
 
@@ -2265,16 +2389,13 @@ mod wgpu_engine {
             self.inner.borrow().hovered_target.get().is_some()
         }
 
-        /// Switches which kind of geometry clicking the canvas acts on —
-        /// "prune" (leaves, see `Plant::prune_leaf`) or "trim" (stems, see
-        /// `Plant::cut_main_stem_at`/`cut_branch_at`); anything else falls
-        /// back to "prune", the same unknown-input convention `set_species`
-        /// already uses. Also clears whatever was hover-picked under the
-        /// *previous* tool, so switching tools never leaves a stale
-        /// highlight/pick target of the wrong kind sitting around.
         pub fn set_active_tool(&self, tool: &str) {
             let mut state = self.inner.borrow_mut();
-            state.active_tool = if tool == "trim" { Tool::Trim } else { Tool::Prune };
+            state.active_tool = match tool {
+                "prune" => Some(Tool::Prune),
+                "trim" => Some(Tool::Trim),
+                _ => None,
+            };
             state.hovered_target.set(None);
         }
 
@@ -2348,6 +2469,11 @@ mod wgpu_engine {
         /// waiting to be planted — see `take_cutting`/`plant_cutting`.
         pub fn inventory_count(&self) -> u32 {
             self.inner.borrow().inventory.len() as u32
+        }
+
+        pub fn grant_seed(&self, species: &str) {
+            let mut state = self.inner.borrow_mut();
+            state.inventory.push(InventoryItem { species_name: species.to_string(), from_seed: true });
         }
 
         /// Which species a given inventory slot's cutting is, for an
@@ -2485,6 +2611,64 @@ mod wgpu_engine {
             self.inner.borrow().selected_plant_index as u32
         }
 
+        /// A small per-pot overlay reading for one plant — the on-screen
+        /// position (in canvas CSS pixels, matching what `Simulation::
+        /// set_pointer_position` already expects) just below this pot's own
+        /// rendered bottom edge, plus enough state (water level, auto-water,
+        /// dead) for a "water this pot" button/gauge to sit there,
+        /// regardless of which plant is currently selected. `None` if
+        /// `index` is out of range.
+        ///
+        /// Reproduces the exact same projection `render` uses to actually
+        /// place this pot's own drawables — `scene::plant_pot_world_anchor`
+        /// for the world-space anchor (the pot mesh's own local origin, see
+        /// its own doc comment), offset down by the "pot" mesh's own baked
+        /// half-height so this tracks the pot's actual bottom edge rather
+        /// than its center, then the same zoom/pan/NDC math `render`'s own
+        /// `cursor_ndc` uses, just inverted (NDC → CSS pixels instead of CSS
+        /// pixels → NDC).
+        pub fn plant_pot_hud(&self, index: u32) -> Option<PlantPotHud> {
+            let state = self.inner.borrow();
+            let slot = state.plants.get(index as usize)?;
+            let zoom = scene::dynamic_zoom_for_room(state.plants.iter().map(|p| &p.plant), &state.scene_layout);
+            let world_anchor = scene::plant_pot_world_anchor(&state.scene_layout, index as usize, slot.pot_position);
+            // `world_anchor` is where the pot mesh's own local origin sits
+            // (see `scene::pot_background` — the pot is drawn centered on
+            // it, same as the soil cap/seed/stem base), not its bottom edge
+            // — offsetting by the mesh's own baked half-height (in the same
+            // pre-zoom units `pot_scale` converts from) moves this down to
+            // just below the pot itself, the same "local vertex, then
+            // scale, then zoom" order `vs_main` applies to every real pot
+            // vertex, so this tracks the pot's actual rendered bottom edge
+            // at any zoom level rather than a fixed guess.
+            let pot_half_height = state.meshes.local_half_extent("pot").1 * state.scene_layout.pot_scale;
+            let below_pot_anchor = [world_anchor[0], world_anchor[1] - pot_half_height];
+            let ndc_x = below_pot_anchor[0] * zoom + state.camera_pan[0];
+            let ndc_y = below_pot_anchor[1] * zoom + state.camera_pan[1];
+            let width_px = state.config.width as f32 / state.device_pixel_ratio;
+            let height_px = state.config.height as f32 / state.device_pixel_ratio;
+            Some(PlantPotHud {
+                x: (ndc_x + 1.0) / 2.0 * width_px,
+                y: (1.0 - ndc_y) / 2.0 * height_px,
+                water_level: slot.soil.moisture,
+                auto_water_enabled: slot.auto_water_enabled,
+                is_dead: slot.plant.stage == Stage::Dead,
+            })
+        }
+
+        pub fn lamp_screen_position(&self) -> ScreenPosition {
+            let state = self.inner.borrow();
+            let zoom = scene::dynamic_zoom_for_room(state.plants.iter().map(|p| &p.plant), &state.scene_layout);
+            let ndc_x = state.scene_layout.lamp_offset[0] * zoom + state.camera_pan[0];
+            let ndc_y = state.scene_layout.lamp_offset[1] * zoom + state.camera_pan[1];
+            let width_px = state.config.width as f32 / state.device_pixel_ratio;
+            let height_px = state.config.height as f32 / state.device_pixel_ratio;
+            ScreenPosition {
+                x: (ndc_x + 1.0) / 2.0 * width_px,
+                y: (1.0 - ndc_y) / 2.0 * height_px,
+            }
+        }
+
         /// Switches which plant every per-plant action (`water`,
         /// `fertilize`, `prune_main_stem`, `stats`, ...) targets — every
         /// plant renders and simulates regardless of selection (see
@@ -2558,6 +2742,12 @@ mod wgpu_engine {
                 days_elapsed,
                 hover_active: state.hovered_target.get().is_some(),
                 moon_illuminated_fraction: moon::appearance(moon_phase).illuminated_fraction,
+                max_height_reached: slot.plant.max_height_reached,
+                max_leaves_at_once: slot.plant.max_leaves_at_once,
+                leaves_produced_total: slot.plant.leaves_produced_total,
+                alive_duration: slot.plant.alive_duration,
+                alive_days: slot.plant.alive_duration / state.growth_config.time.day_length_sim_seconds,
+                bloom_intensity: slot.plant.bloom_intensity,
             })
         }
     }

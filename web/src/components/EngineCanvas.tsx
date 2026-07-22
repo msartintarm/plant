@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { basePath } from "@/lib/basePath";
 import {
+  formatDays,
   formatHeight,
   formatNutrient,
   formatPercent,
@@ -18,6 +19,8 @@ import {
   waterTier,
   type HealthTier,
 } from "@/lib/healthTiers";
+import { CHALLENGES, loadCompletedChallenges, newlyCompletedChallenges, saveCompletedChallenges } from "@/lib/challenges";
+import { loadHighScores, mergeHighScores, saveHighScores, type PlantMetrics } from "@/lib/scoring";
 import styles from "./EngineCanvas.module.css";
 
 // Maps a gauge's current tier (see src/lib/healthTiers.ts) to its CSS
@@ -53,6 +56,29 @@ interface EngineStats {
   days_elapsed: number;
   hover_active: boolean;
   moon_illuminated_fraction: number;
+  max_height_reached: number;
+  max_leaves_at_once: number;
+  leaves_produced_total: number;
+  alive_duration: number;
+  alive_days: number;
+  bloom_intensity: number;
+}
+
+interface ScreenPosition {
+  x: number;
+  y: number;
+}
+
+// One per plant, polled every cycle alongside `plantTabs` — unlike
+// `EngineStats` (which only ever describes the *selected* plant), this
+// backs the small water gauge/button drawn under *every* pot at once (see
+// `Simulation::plant_pot_hud`).
+interface PlantPotHud {
+  x: number;
+  y: number;
+  water_level: number;
+  auto_water_enabled: boolean;
+  is_dead: boolean;
 }
 
 interface EngineSimulation {
@@ -60,6 +86,7 @@ interface EngineSimulation {
   stop(): void;
   resize(width: number, height: number, devicePixelRatio: number): void;
   water(amount: number): void;
+  water_plant(index: number, amount: number): void;
   fertilize(amount: number): void;
   mist(amount: number): void;
   treat_pests(): void;
@@ -86,7 +113,10 @@ interface EngineSimulation {
   set_selected_plant(index: number): void;
   inventory_count(): number;
   inventory_species(index: number): string;
+  grant_seed(species: string): void;
   plant_cutting(index: number, realisticScale: boolean): boolean;
+  plant_pot_hud(index: number): PlantPotHud | undefined;
+  lamp_screen_position(): ScreenPosition;
   free(): void;
 }
 
@@ -122,7 +152,7 @@ const STATS_POLL_MS = 250;
 // drag-to-pan rather than a click/tap-to-prune — small enough to feel
 // immediate, large enough that a slightly wobbly tap still prunes.
 const DRAG_THRESHOLD_PX = 4;
-const WATER_DOSE = 0.5;
+const WATER_DOSE = 0.05;
 const FERTILIZE_DOSE = 0.3;
 const MIST_DOSE = 0.3;
 const DEFAULT_TIME_SCALE = 1.0;
@@ -132,6 +162,7 @@ const SPECIES_OPTIONS: { value: string; label: string }[] = [
   { value: "peace_lily", label: "Peace Lily (rosette)" },
   { value: "pothos", label: "Pothos (climbing)" },
 ];
+const UNLOCKABLE_SPECIES = ["peace_lily", "pothos"];
 
 // A short label/icon for a species name coming back from the engine (plant
 // tabs, inventory items) — falls back to the raw name for anything not in
@@ -202,7 +233,7 @@ export default function EngineCanvas() {
   const [species, setSpecies] = useState(DEFAULT_SPECIES);
   const [potPosition, setPotPosition] = useState(0);
   const [showSeedInfo, setShowSeedInfo] = useState(false);
-  const [activeTool, setActiveTool] = useState<"prune" | "trim">("prune");
+  const [activeTool, setActiveTool] = useState<"prune" | "trim" | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   // One entry per plant currently in the room, its own species name (see
   // `Simulation::plant_species`) — index lines up with `set_selected_
@@ -211,11 +242,28 @@ export default function EngineCanvas() {
   // elsewhere always shows the room's real current state.
   const [plantTabs, setPlantTabs] = useState<string[]>([]);
   const [selectedPlantIndex, setSelectedPlantIndex] = useState(0);
+  // One reading per plant, indexed the same as `plantTabs` — positions and
+  // waters the small gauge/button drawn under each pot in the scene itself
+  // (see `Simulation::plant_pot_hud`), independent of which plant the
+  // settings HUD currently has selected.
+  const [potHuds, setPotHuds] = useState<PlantPotHud[]>([]);
+  const [lampPosition, setLampPosition] = useState<ScreenPosition | null>(null);
+  const [debugUnlocked, setDebugUnlocked] = useState(false);
   const [newPlantSpecies, setNewPlantSpecies] = useState(DEFAULT_SPECIES);
   const [newPlantRealisticScale, setNewPlantRealisticScale] = useState(false);
   // One entry per stem cutting waiting to be planted (see `Simulation::
   // take_cutting`/`plant_cutting`), its own species name.
   const [inventory, setInventory] = useState<string[]>([]);
+  // Best-ever reading per metric across every plant this browser has ever
+  // grown (see src/lib/scoring.ts) and which milestone challenges (see
+  // src/lib/challenges.ts) have ever been earned — both persisted to
+  // localStorage, so they survive a restart/replaced plant rather than
+  // resetting with it. Lazy initializers (like `seedDate` below), not a
+  // mount effect — `loadHighScores`/`loadCompletedChallenges` already fall
+  // back to zero/empty when `localStorage` isn't available.
+  const [highScores, setHighScores] = useState<PlantMetrics>(() => loadHighScores());
+  const [completedChallenges, setCompletedChallenges] = useState<Set<string>>(() => loadCompletedChallenges());
+  const [showScores, setShowScores] = useState(false);
   // Captured once, at mount, rather than read fresh each render — this has
   // to be the *exact* same date actually handed to `Simulation.create`
   // below, not a second, independently-taken `new Date()` that could in
@@ -255,6 +303,9 @@ export default function EngineCanvas() {
           return;
         }
         simRef.current = created;
+        if (loadCompletedChallenges().size >= CHALLENGES.length) {
+          UNLOCKABLE_SPECIES.forEach((s) => created.grant_seed(s));
+        }
         created.start();
         setStatus("ready");
       } catch (err) {
@@ -392,8 +443,15 @@ export default function EngineCanvas() {
       // from any code path always shows up promptly.
       const plantCount = sim.plant_count();
       const tabs: string[] = [];
-      for (let i = 0; i < plantCount; i++) tabs.push(sim.plant_species(i));
+      const huds: PlantPotHud[] = [];
+      for (let i = 0; i < plantCount; i++) {
+        tabs.push(sim.plant_species(i));
+        const hud = sim.plant_pot_hud(i);
+        if (hud) huds.push(hud);
+      }
       setPlantTabs(tabs);
+      setPotHuds(huds);
+      setLampPosition(sim.lamp_screen_position());
       const selected = sim.selected_plant_index();
       setSelectedPlantIndex(selected);
       // Keeps the HUD's own species selector and pot-placement slider
@@ -403,6 +461,37 @@ export default function EngineCanvas() {
       if (currentStats) {
         setPotPosition(currentStats.pot_position);
         setAutoWater(currentStats.auto_water_enabled);
+
+        // Rolls this plant's current lifetime metrics into the browser's
+        // running best-ever record (see src/lib/scoring.ts), then checks
+        // whether that updated record just crossed any milestone challenge
+        // threshold (src/lib/challenges.ts) — both persisted to
+        // localStorage only when something actually changed, so a
+        // steady-state plant that isn't setting any new records doesn't
+        // write to storage every poll tick.
+        const freshMetrics: PlantMetrics = {
+          maxHeightReached: currentStats.max_height_reached,
+          maxLeavesAtOnce: currentStats.max_leaves_at_once,
+          leavesProducedTotal: currentStats.leaves_produced_total,
+          aliveDays: currentStats.alive_days,
+        };
+        setHighScores((previousScores) => {
+          const { scores, improved } = mergeHighScores(previousScores, freshMetrics);
+          if (improved.length === 0) return previousScores;
+          saveHighScores(scores);
+          setCompletedChallenges((previousCompleted) => {
+            const newlyDone = newlyCompletedChallenges(scores, previousCompleted);
+            if (newlyDone.length === 0) return previousCompleted;
+            const nextCompleted = new Set(previousCompleted);
+            newlyDone.forEach((id) => nextCompleted.add(id));
+            saveCompletedChallenges(nextCompleted);
+            if (previousCompleted.size < CHALLENGES.length && nextCompleted.size >= CHALLENGES.length) {
+              UNLOCKABLE_SPECIES.forEach((s) => sim.grant_seed(s));
+            }
+            return nextCompleted;
+          });
+          return scores;
+        });
       }
 
       const inventoryCount = sim.inventory_count();
@@ -423,6 +512,12 @@ export default function EngineCanvas() {
 
   function handleWater() {
     simRef.current?.water(WATER_DOSE);
+  }
+
+  // Waters a specific pot directly (see the per-pot gauge in the JSX below)
+  // without disturbing which plant the settings HUD has selected.
+  function handleWaterPlant(index: number) {
+    simRef.current?.water_plant(index, WATER_DOSE);
   }
 
   function handleFertilize() {
@@ -481,20 +576,9 @@ export default function EngineCanvas() {
   }
 
   function handleToolChange(tool: "prune" | "trim") {
-    setActiveTool(tool);
-    simRef.current?.set_active_tool(tool);
-  }
-
-  function handleSpeciesChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const next = e.target.value;
-    const realisticScale = stats?.realistic_scale ?? false;
-    setSpecies(next);
-    // Switching species starts a fresh plant/soil under the new habit (see
-    // Simulation::set_species) — the old stats snapshot no longer describes
-    // anything that still exists, so clear it rather than show one stale
-    // frame of the previous plant's numbers next to the new one's zeros.
-    setStats(null);
-    simRef.current?.set_species(next, realisticScale);
+    const next = activeTool === tool ? null : tool;
+    setActiveTool(next);
+    simRef.current?.set_active_tool(next ?? "");
   }
 
   // Switches which plant the HUD/actions target — every plant in the room
@@ -518,6 +602,35 @@ export default function EngineCanvas() {
   return (
     <div className={styles.wrapper}>
       <canvas ref={canvasRef} className={styles.canvas} />
+      {status === "ready" && lampPosition && !debugUnlocked && (
+        <button
+          type="button"
+          onClick={() => setDebugUnlocked(true)}
+          className={styles.lampHotspot}
+          style={{ left: lampPosition.x, top: lampPosition.y }}
+          aria-label="lamp"
+        />
+      )}
+      {status === "ready" &&
+        potHuds.map((hud, index) => (
+          <div
+            key={index}
+            className={styles.potWaterBadge}
+            style={{ left: hud.x, top: hud.y }}
+            title={`Plant ${index + 1} — ${Math.round(hud.water_level * 100)}% water`}
+          >
+            <span className={tierClassName(waterTier(hud.water_level))}>💧 {formatPercent(hud.water_level)}</span>
+            <button
+              type="button"
+              onClick={() => handleWaterPlant(index)}
+              className={styles.actionButton}
+              disabled={hud.auto_water_enabled || hud.is_dead}
+              aria-label={`Water plant ${index + 1}`}
+            >
+              Water
+            </button>
+          </div>
+        ))}
       {status !== "ready" && (
         <div className={styles.status}>
           {status === "loading" && <span>Loading engine…</span>}
@@ -571,14 +684,16 @@ export default function EngineCanvas() {
                   </option>
                 ))}
               </select>
-              <label className={styles.realisticScaleLabel} title="Cap growth near a real houseplant's mature size instead of growing indefinitely">
-                <input
-                  type="checkbox"
-                  checked={newPlantRealisticScale}
-                  onChange={(e) => setNewPlantRealisticScale(e.target.checked)}
-                />
-                Realistic scale
-              </label>
+              {debugUnlocked && (
+                <label className={styles.realisticScaleLabel} title="Cap growth near a real houseplant's mature size instead of growing indefinitely">
+                  <input
+                    type="checkbox"
+                    checked={newPlantRealisticScale}
+                    onChange={(e) => setNewPlantRealisticScale(e.target.checked)}
+                  />
+                  Realistic scale
+                </label>
+              )}
               <button
                 type="button"
                 onClick={() => handlePlantFromInventory(effectiveNewPlantSpecies)}
@@ -593,6 +708,16 @@ export default function EngineCanvas() {
       )}
       {stats && (stats.leaf_count > 0 || stats.stem_segment_count > 0) && (
         <div className={styles.toolTag}>
+          {stats.stem_segment_count > 0 && (
+            <button
+              type="button"
+              onClick={() => handleToolChange("trim")}
+              className={`${styles.toolButton} ${activeTool === "trim" ? styles.toolButtonActive : ""}`}
+              title="Hover the stem (even under a leaf) and click to cut it at that point"
+            >
+              ✂️ Trim
+            </button>
+          )}
           {stats.leaf_count > 0 && (
             <button
               type="button"
@@ -601,16 +726,6 @@ export default function EngineCanvas() {
               title="Hover a leaf and click to remove it"
             >
               🔪 Prune
-            </button>
-          )}
-          {stats.stem_segment_count > 0 && (
-            <button
-              type="button"
-              onClick={() => handleToolChange("trim")}
-              className={`${styles.toolButton} ${activeTool === "trim" ? styles.toolButtonActive : ""}`}
-              title="Hover the stem and click to cut it at that point"
-            >
-              ✂️ Trim
             </button>
           )}
         </div>
@@ -644,6 +759,53 @@ export default function EngineCanvas() {
               </div>
             )}
           </div>
+          <div className={styles.seedTagRow}>
+            <button
+              type="button"
+              className={styles.seedTag}
+              onClick={() => setShowScores((shown) => !shown)}
+              aria-expanded={showScores}
+            >
+              🏆 Scores ({completedChallenges.size}/{CHALLENGES.length})
+            </button>
+            {showScores && (
+              <div className={styles.scoresPanel}>
+                <div className={styles.scoresPanelTitle}>Best ever (this browser)</div>
+                <div className={styles.scoreRow}>
+                  <span>📏 Tallest</span>
+                  <span>{formatHeight(highScores.maxHeightReached)}</span>
+                </div>
+                <div className={styles.scoreRow}>
+                  <span>🍃 Most leaves at once</span>
+                  <span>{highScores.maxLeavesAtOnce}</span>
+                </div>
+                <div className={styles.scoreRow}>
+                  <span>🌿 Leaves grown, lifetime</span>
+                  <span>{highScores.leavesProducedTotal}</span>
+                </div>
+                <div className={styles.scoreRow}>
+                  <span>⏳ Longest lived</span>
+                  <span>{formatDays(highScores.aliveDays)}</span>
+                </div>
+                <div className={styles.scoresPanelTitle}>Challenges</div>
+                <ul className={styles.challengeList}>
+                  {CHALLENGES.map((challenge) => (
+                    <li
+                      key={challenge.id}
+                      className={`${styles.challengeItem} ${
+                        completedChallenges.has(challenge.id) ? styles.challengeItemDone : ""
+                      }`}
+                    >
+                      <span>{completedChallenges.has(challenge.id) ? "✅" : "⬜"}</span>
+                      <span>
+                        {challenge.icon} {challenge.label}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         </div>
       )}
       {stats && (
@@ -658,18 +820,13 @@ export default function EngineCanvas() {
           </button>
           <div className={`${styles.hud} ${showSettings ? styles.hudOpen : ""}`}>
               <div className={styles.hudRow}>
-                <label htmlFor="species">Species:</label>
-                <select id="species" value={species} onChange={handleSpeciesChange} className={styles.speciesSelect}>
-                  {SPECIES_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                <span>Species: {speciesLabel(species)}</span>
               </div>
-              <div className={styles.hudRow}>
-                <span>{stats.realistic_scale ? "🌿 realistic" : "🌳 gigantic"}</span>
-              </div>
+              {debugUnlocked && (
+                <div className={styles.hudRow}>
+                  <span>{stats.realistic_scale ? "🌿 realistic" : "🌳 gigantic"}</span>
+                </div>
+              )}
               <div className={styles.hudRow}>
                 <span>
                   {stats.stage} · {stats.is_daytime ? "☀️" : "🌙"} {formatTimeOfDay(stats.day_progress)}
@@ -686,6 +843,7 @@ export default function EngineCanvas() {
                 <span>
                   Leaves: {stats.leaf_count} · Branches: {stats.branch_count}
                 </span>
+                <span>🌸 Bloom: {formatPercent(stats.bloom_intensity)}</span>
               </div>
 
               <div className={`${styles.hudRow} ${tierClassName(waterTier(stats.water_level))}`}>
@@ -778,7 +936,7 @@ export default function EngineCanvas() {
                   id="time-scale"
                   type="range"
                   min={0.25}
-                  max={5}
+                  max={20}
                   step={0.25}
                   value={timeScale}
                   onChange={handleTimeScaleChange}

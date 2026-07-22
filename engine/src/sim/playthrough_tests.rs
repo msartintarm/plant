@@ -26,14 +26,11 @@ const INERT_HUMIDITY: f64 = 1.0;
 
 /// Steps `plant`/`soil` forward by `real_seconds` of wall-clock time using
 /// the same real-time-to-sim-time conversion `render/mod.rs`'s frame loop
-/// does, at a fixed 1-real-second sub-step (coarser than an actual frame,
-/// but the model has no per-substep-granularity-dependent behavior other
-/// than exactly when a discrete threshold — a leaf/branch spawning, a stage
-/// transition — gets crossed, which isn't what these tests are checking).
-/// `water_every` (real seconds), if `Some`, tops up the soil by
-/// `water_amount` on that cadence — `None` models "nobody manually waters
-/// it." `auto_water` mirrors the render loop calling
-/// `Soil::apply_auto_water` once per tick — see `Simulation::set_auto_water`.
+/// does, at a fixed 1-real-second sub-step. `water_every` (real seconds), if
+/// `Some`, tops up the soil by `water_amount` on that cadence — `None`
+/// models "nobody manually waters it." `auto_water` mirrors the render loop
+/// calling `Soil::apply_auto_water` once per tick — see `Simulation::
+/// set_auto_water`.
 fn play(
     plant: &mut Plant,
     soil: &mut Soil,
@@ -43,12 +40,42 @@ fn play(
     water_amount: f64,
     auto_water: bool,
 ) {
-    let real_dt = 1.0;
-    let mut elapsed_real = 0.0;
+    play_with_sim_dt(
+        plant,
+        soil,
+        config,
+        real_seconds,
+        water_every,
+        water_amount,
+        auto_water,
+        config.time.sim_seconds_per_real_second,
+    );
+}
+
+/// Like `play`, but with the per-substep sim-seconds chunk given explicitly
+/// instead of derived from `config.time.sim_seconds_per_real_second` — a
+/// branch only spawns once `Plant::carbon_pool` clears `PlantConfig::
+/// new_branch_carbon_cost` *in a single tick* (no backlog/catch-up the way
+/// leaf spawning has), so how large each tick's income actually is — not
+/// just the total sim-time elapsed — determines whether that threshold is
+/// ever crossed at all. A handful of tests below rely on this to keep
+/// exercising the same tick-size branch formation was originally calibrated
+/// against, independent of whatever the UI's own default pace is tuned to.
+fn play_with_sim_dt(
+    plant: &mut Plant,
+    soil: &mut Soil,
+    config: &GrowthConfig,
+    real_seconds: f64,
+    water_every: Option<f64>,
+    water_amount: f64,
+    auto_water: bool,
+    sim_dt: f64,
+) {
+    let total_sim_seconds = real_seconds * config.time.sim_seconds_per_real_second;
+    let mut elapsed_sim = 0.0;
     let mut day_progress = 0.0;
     let mut since_last_watering = 0.0;
-    while elapsed_real < real_seconds {
-        let sim_dt = real_dt * config.time.sim_seconds_per_real_second;
+    while elapsed_sim < total_sim_seconds {
         day_progress =
             (day_progress + sim_dt / config.time.day_length_sim_seconds).rem_euclid(1.0);
         let sun_state = sun::sun_state(day_progress, &config.sun);
@@ -56,7 +83,8 @@ fn play(
         plant.step(sim_dt, &sun_state, &climate_state, soil, INERT_HUMIDITY, config);
         soil.apply_auto_water(auto_water, &config.soil);
 
-        elapsed_real += real_dt;
+        elapsed_sim += sim_dt;
+        let real_dt = sim_dt / config.time.sim_seconds_per_real_second;
         since_last_watering += real_dt;
         if let Some(interval) = water_every {
             if since_last_watering >= interval {
@@ -105,7 +133,7 @@ fn auto_water_sustains_growth_and_branching_without_any_manual_watering() {
     // babysit the Water button for a fast-growing plant's ever-increasing
     // transpiration — this is the end-to-end proof it actually substitutes
     // for manual watering, not just that `Soil::apply_auto_water` itself
-    // holds a floor (see soil.rs's own unit tests for that). Kept to 45
+    // holds a floor (see soil.rs's own unit tests for that). Kept to 180
     // real seconds, not longer: past that (at this demo's fast pacing) the
     // plant's own height starts running past `PlantConfig::
     // window_light_zone_height`, and a plant genuinely starved of light
@@ -115,7 +143,7 @@ fn auto_water_sustains_growth_and_branching_without_any_manual_watering() {
     let config = GrowthConfig::default();
     let mut plant = Plant::new();
     let mut soil = Soil::new(&config.soil);
-    play(&mut plant, &mut soil, &config, 45.0, None, 0.0, true);
+    play_with_sim_dt(&mut plant, &mut soil, &config, 180.0, None, 0.0, true, 80.0);
 
     assert_eq!(plant.stage, Stage::Vegetative);
     assert!(
@@ -124,7 +152,7 @@ fn auto_water_sustains_growth_and_branching_without_any_manual_watering() {
     );
     assert!(
         !plant.branches.is_empty(),
-        "expected at least one branch within 5 real minutes of auto-watered growth"
+        "expected at least one branch within 3 real minutes of auto-watered growth"
     );
     assert!(
         plant.branches.iter().any(|b| !b.leaves.is_empty()),
@@ -139,24 +167,24 @@ fn with_sustaining_manual_watering_branches_appear_within_a_reasonable_session()
     // real seconds is generous but no longer the exploit-grade "every 15
     // seconds forever" the old, miscalibrated `transpiration_coeff` used to
     // require just to keep a leafy plant alive at all (see that field's own
-    // doc comment on the recalibration). Kept short (45s, not 5 minutes) —
+    // doc comment on the recalibration). Kept short (180s, not longer) —
     // see `auto_water_sustains_growth_and_branching_without_any_manual_
     // watering`'s comment on why: past that the plant's height runs into
     // `height_light_factor`'s falloff, a separate, deliberate mechanism.
     let config = GrowthConfig::default();
     let mut plant = Plant::new();
     let mut soil = Soil::new(&config.soil);
-    play(&mut plant, &mut soil, &config, 45.0, Some(20.0), 1.0, false);
+    play_with_sim_dt(&mut plant, &mut soil, &config, 180.0, Some(20.0), 1.0, false, 80.0);
 
     assert_eq!(plant.stage, Stage::Vegetative);
     assert!(
         plant.height >= config.plant.min_height_for_branching,
-        "expected to clear the branching height threshold within 45 real seconds: height {}",
+        "expected to clear the branching height threshold within 180 real seconds: height {}",
         plant.height
     );
     assert!(
         !plant.branches.is_empty(),
-        "expected at least one branch within 45 real seconds of sustained watering"
+        "expected at least one branch within 180 real seconds of sustained watering"
     );
     assert!(
         plant.branches.iter().any(|b| !b.leaves.is_empty()),
@@ -178,7 +206,7 @@ fn every_branch_grows_its_own_leaves_roughly_fairly_over_a_long_multi_stem_sessi
     // `Plant::spawn_due_leaves_fairly` — "persistent" specifically because
     // a rotation that reset every tick never advanced past its first slot,
     // since most ticks only afford a handful of leaf-spawns in total).
-    // Kept to 90 real seconds — comfortably long enough for every branch to
+    // Kept to 360 real seconds — comfortably long enough for every branch to
     // form and the fairness mechanism to even out, but short enough to stay
     // within the plant's own light zone (`height_light_factor`); past that,
     // a genuinely light-starved plant eventually stops affording leaves at
@@ -187,12 +215,12 @@ fn every_branch_grows_its_own_leaves_roughly_fairly_over_a_long_multi_stem_sessi
     let config = GrowthConfig::default();
     let mut plant = Plant::new();
     let mut soil = Soil::new(&config.soil);
-    play(&mut plant, &mut soil, &config, 90.0, None, 0.0, true);
+    play_with_sim_dt(&mut plant, &mut soil, &config, 360.0, None, 0.0, true, 80.0);
 
     assert_eq!(
         plant.branches.len(),
         config.plant.max_branches,
-        "expected the crown to fill out to its cap over a 90-second session"
+        "expected the crown to fill out to its cap over a 360-second session"
     );
     for (i, branch) in plant.branches.iter().enumerate() {
         assert!(
@@ -367,15 +395,15 @@ fn a_player_who_waters_every_single_real_second_damages_root_health_and_can_kill
     // reasonable_session` test just above, which waters every 20 real
     // seconds and never triggers this). At this demo's own aggressively
     // fast validation pacing (see `sim::config::TimeConfig`'s doc comment),
-    // sustained flooding is severe enough to kill the plant within a couple
-    // of real minutes — a strong, legible version of the real lesson
+    // sustained flooding is severe enough to kill the plant within around
+    // eight real minutes — a strong, legible version of the real lesson
     // ("more water isn't always better") this mechanic exists to teach, not
     // a bug; a slower, gameplay-tuned pacing would stretch this out
     // considerably.
     let config = GrowthConfig::default();
     let mut plant = Plant::new();
     let mut soil = Soil::new(&config.soil);
-    play(&mut plant, &mut soil, &config, 120.0, Some(1.0), 1.0, false);
+    play(&mut plant, &mut soil, &config, 480.0, Some(1.0), 1.0, false);
 
     assert_eq!(plant.stage, Stage::Dead, "expected sustained flooding to eventually kill the plant");
     assert_eq!(plant.root_health, 0.0, "expected it to have died specifically from total root loss");
@@ -391,7 +419,7 @@ fn pruning_a_freshly_grown_stem_immediately_produces_branches_well_before_the_no
     let config = GrowthConfig::default();
     let mut plant = Plant::new();
     let mut soil = Soil::new(&config.soil);
-    play(&mut plant, &mut soil, &config, 3.0, Some(2.0), 1.0, false);
+    play(&mut plant, &mut soil, &config, 12.0, Some(2.0), 1.0, false);
 
     assert_eq!(plant.stage, Stage::Vegetative);
     assert!(
@@ -432,33 +460,33 @@ fn default_no_input_play_keeps_growing_leaves_instead_of_stalling_at_one() {
 }
 
 #[test]
-fn true_zero_input_session_crashes_bone_dry_within_a_real_minute_and_starves() {
+fn true_zero_input_session_crashes_bone_dry_and_starves() {
     // The actual UI default is auto-water OFF and no manual watering — a
-    // player who loads the page and does nothing. At this demo's 80x-sim-
-    // speed pacing, soil crashes to bone dry in well under a real minute
-    // regardless of the plant, so this genuinely requires watering or
-    // auto-water almost immediately, not a leisurely "check back later."
-    // Leaf count does climb past 1 early (drought hadn't bitten yet), then
-    // collapses as the plant sheds leaves under sustained drought, ending
-    // in starvation. Pinned here as the documented current behavior.
+    // player who loads the page and does nothing. At this demo's 20x-sim-
+    // speed pacing, soil crashes to bone dry quickly regardless of the
+    // plant, so this genuinely requires watering or auto-water almost
+    // immediately, not a leisurely "check back later." Leaf count does
+    // climb past 1 early (drought hadn't bitten yet), then collapses as the
+    // plant sheds leaves under sustained drought, ending in starvation.
+    // Pinned here as the documented current behavior.
     let config = GrowthConfig::default();
     let mut plant = Plant::new();
     let mut soil = Soil::new(&config.soil);
     let mut humidity = super::humidity::Humidity::new(&config.humidity);
     let mut day_progress = 0.0;
-    let mut leaves_at_30s = 0;
-    for i in 0..150 {
+    let mut leaves_at_120s = 0;
+    for i in 0..600 {
         let sim_dt = config.time.sim_seconds_per_real_second;
         day_progress = (day_progress + sim_dt / config.time.day_length_sim_seconds).rem_euclid(1.0);
         let sun_state = sun::sun_state(day_progress, &config.sun);
         let climate_state = climate::climate_state(day_progress, &config.climate);
         humidity.update(sim_dt, climate_state.temperature_c, &config.humidity);
         plant.step(sim_dt, &sun_state, &climate_state, &mut soil, humidity.level, &config);
-        if i == 30 {
-            leaves_at_30s = plant.leaves.len();
+        if i == 120 {
+            leaves_at_120s = plant.leaves.len();
         }
     }
-    assert!(leaves_at_30s > 1, "expected leaf growth past the first leaf before drought bites, got {leaves_at_30s}");
+    assert!(leaves_at_120s > 1, "expected leaf growth past the first leaf before drought bites, got {leaves_at_120s}");
     assert_eq!(soil.moisture, 0.0, "expected soil to have crashed bone dry with zero watering");
     assert_eq!(plant.stage, Stage::Dead, "expected sustained drought to eventually starve the plant");
     assert_eq!(plant.death_cause, Some(super::plant::DeathCause::Starvation));
@@ -477,7 +505,7 @@ fn a_plant_that_permanently_outgrows_its_light_source_eventually_dies_rather_tha
     let mut soil = Soil::new(&config.soil);
     let mut humidity = super::humidity::Humidity::new(&config.humidity);
     let mut day_progress = 0.0;
-    for _ in 0..600 {
+    for _ in 0..2400 {
         let sim_dt = config.time.sim_seconds_per_real_second;
         day_progress = (day_progress + sim_dt / config.time.day_length_sim_seconds).rem_euclid(1.0);
         let sun_state = sun::sun_state(day_progress, &config.sun);
@@ -489,4 +517,3 @@ fn a_plant_that_permanently_outgrows_its_light_source_eventually_dies_rather_tha
     assert_eq!(plant.stage, Stage::Dead);
     assert_eq!(plant.death_cause, Some(super::plant::DeathCause::Starvation));
 }
-

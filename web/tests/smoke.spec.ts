@@ -16,7 +16,7 @@ function collectConsoleErrors(page: Page): string[] {
 
 async function addFirstPlant(page: Page) {
   await page.getByRole("button", { name: "Add plant" }).click();
-  await expect(page.getByText(/Seed|Sprout|Vegetative/)).toBeVisible({ timeout: 2_000 });
+  await expect(page.getByText(/Day \d+/)).toBeVisible({ timeout: 2_000 });
 }
 
 async function openSettings(page: Page) {
@@ -87,7 +87,7 @@ test("the room starts with no plant until one is added", async ({ page }) => {
   await expect(page.getByText(/Seed|Sprout|Vegetative/)).not.toBeVisible();
 
   await addFirstPlant(page);
-  await expect(page.getByRole("button", { name: "Add plant" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add plant" })).not.toBeVisible();
 
   expect(errors).toEqual([]);
 });
@@ -99,8 +99,6 @@ test("the starting inventory is spent as plants are added", async ({ page }) => 
   await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
 
   const addButton = page.getByRole("button", { name: "Add plant" });
-  await addButton.click();
-  await addButton.click();
   await addButton.click();
   await expect(addButton).not.toBeVisible();
 
@@ -131,7 +129,7 @@ test("the water button and time-scale slider don't error when used", async ({ pa
   await addFirstPlant(page);
   await openSettings(page);
 
-  await page.getByRole("button", { name: "Water" }).click();
+  await page.getByRole("button", { name: "Water", exact: true }).click();
   const slider = page.getByLabel(/Speed:/);
   await slider.fill("2.5");
   await expect(page.getByText("Speed: 2.50x")).toBeVisible();
@@ -153,7 +151,7 @@ test("the auto-water toggle enables without erroring and disables the manual but
   await openSettings(page);
 
   const autoWaterCheckbox = page.getByLabel("Auto-water");
-  const waterButton = page.getByRole("button", { name: "Water" });
+  const waterButton = page.getByRole("button", { name: "Water", exact: true });
   await expect(waterButton).toBeEnabled();
 
   await autoWaterCheckbox.check();
@@ -183,9 +181,9 @@ test("a default no-input session grows past the first leaf (real browser/wasm lo
   await openSettings(page);
 
   // Speed up sim time so this doesn't need a full real minute of wall-clock
-  // waiting — 5x is the slider's own max.
+  // waiting — 20x is the slider's own max.
   const slider = page.getByLabel(/Speed:/);
-  await slider.fill("5");
+  await slider.fill("20");
 
   await page.waitForTimeout(15_000);
 
@@ -193,26 +191,6 @@ test("a default no-input session grows past the first leaf (real browser/wasm lo
   const leafCount = Number(leafText?.match(/Leaves: (\d+)/)?.[1]);
   expect(leafCount, `expected leaf growth past the first leaf, got "${leafText}"`).toBeGreaterThan(1);
 
-  expect(errors).toEqual([]);
-});
-
-test("switching species resets the HUD and doesn't error", async ({ page }) => {
-  const errors = collectConsoleErrors(page);
-
-  await page.goto("/");
-  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
-  await addFirstPlant(page);
-  await openSettings(page);
-
-  const speciesSelect = page.getByLabel("Species:");
-  await speciesSelect.selectOption("peace_lily");
-  // Switching species starts a fresh plant — germination happens almost
-  // immediately at this demo's pacing (soil starts well above the
-  // threshold), so "Seed" can flash by faster than a poll cycle; "no
-  // branches yet" is the durable post-reset signal instead.
-  await expect(page.getByText(/Branches: 0/)).toBeVisible({ timeout: 2_000 });
-
-  await page.waitForTimeout(500);
   expect(errors).toEqual([]);
 });
 
@@ -225,7 +203,7 @@ test("the prune and trim tools are independently selectable", async ({ page }) =
   await openSettings(page);
 
   const slider = page.getByLabel(/Speed:/);
-  await slider.fill("5");
+  await slider.fill("20");
 
   const pruneButton = page.getByRole("button", { name: "🔪 Prune" });
   const trimButton = page.getByRole("button", { name: "✂️ Trim" });
@@ -234,55 +212,6 @@ test("the prune and trim tools are independently selectable", async ({ page }) =
 
   await trimButton.click();
   await pruneButton.click();
-
-  expect(errors).toEqual([]);
-});
-
-// Regression test for a real bug report: the moon's phase looked frozen
-// across a session with a few restarts in it. Root cause was `render::mod`
-// driving the moon off `Plant::total_time` (which resets to 0 on every
-// restart/species-switch/cutting) instead of a persistent session clock —
-// every restart snapped the moon back near its starting phase. `sim::moon`'s
-// own design is a real, ongoing astronomical cycle that shouldn't care
-// whether the current plant is brand new, so this asserts the fix directly:
-// switching species must never move the displayed moon phase backward.
-test("the moon's phase keeps advancing across a species switch instead of resetting", async ({ page }) => {
-  const errors = collectConsoleErrors(page);
-
-  await page.goto("/");
-  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
-  await addFirstPlant(page);
-
-  await page.getByRole("button", { name: "🌱 Seed info" }).click();
-  const moonReading = page.getByText(/Moon: \d+% lit/);
-  await expect(moonReading).toBeVisible();
-
-  await openSettings(page);
-  const slider = page.getByLabel(/Speed:/);
-  await slider.fill("5");
-  await page.waitForTimeout(2_000);
-
-  const readMoonPercent = async () => {
-    const text = await moonReading.textContent();
-    const match = text?.match(/Moon: (\d+)% lit/);
-    return match ? Number(match[1]) : null;
-  };
-
-  const beforeSwitch = await readMoonPercent();
-  expect(beforeSwitch, `couldn't read the moon reading from "${await moonReading.textContent()}"`).not.toBeNull();
-
-  const speciesSelect = page.getByLabel("Species:");
-  await speciesSelect.selectOption("pothos");
-  await expect(page.getByText(/Branches: 0/)).toBeVisible({ timeout: 2_000 });
-
-  await page.waitForTimeout(2_000);
-  const afterSwitch = await readMoonPercent();
-  expect(afterSwitch, `couldn't read the moon reading from "${await moonReading.textContent()}"`).not.toBeNull();
-
-  expect(
-    afterSwitch,
-    `moon reading went from ${beforeSwitch}% to ${afterSwitch}% across a species switch — it should only ever move forward`,
-  ).toBeGreaterThanOrEqual(beforeSwitch!);
 
   expect(errors).toEqual([]);
 });
@@ -305,7 +234,7 @@ test("the moon's illuminated-fraction reading visibly changes over a short accel
 
   await openSettings(page);
   const slider = page.getByLabel(/Speed:/);
-  await slider.fill("5");
+  await slider.fill("20");
 
   const readMoonPercent = async () => {
     const text = await moonReading.textContent();
@@ -321,7 +250,50 @@ test("the moon's illuminated-fraction reading visibly changes over a short accel
   const after = await readMoonPercent();
   expect(after, `couldn't read the moon reading from "${await moonReading.textContent()}"`).not.toBeNull();
 
-  expect(after, `moon reading stayed at ${before}% lit over 6s at 5x speed — expected it to visibly move`).not.toBe(before);
+  expect(after, `moon reading stayed at ${before}% lit over 6s at 20x speed — expected it to visibly move`).not.toBe(before);
+
+  expect(errors).toEqual([]);
+});
+
+test("a flowering plant's bloom reading visibly grows then shrinks over a bloom cycle", async ({ page }) => {
+  test.setTimeout(240_000);
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
+
+  await page.getByLabel("Auto-water").check();
+  const slider = page.getByLabel(/Speed:/);
+  await slider.fill("20");
+
+  const bloomReading = page.getByText(/🌸 Bloom: \d+%/);
+  await expect(bloomReading).toBeVisible();
+
+  const readBloomPercent = async () => {
+    const text = await bloomReading.textContent();
+    const match = text?.match(/🌸 Bloom: (\d+)%/);
+    return match ? Number(match[1]) : null;
+  };
+
+  let peak = 0;
+  const growDeadline = Date.now() + 150_000;
+  while (Date.now() < growDeadline && peak < 50) {
+    const value = await readBloomPercent();
+    if (value !== null) peak = Math.max(peak, value);
+    await page.waitForTimeout(1_000);
+  }
+  expect(peak, "expected the bloom reading to rise above 50% at some point during an accelerated bloom cycle").toBeGreaterThanOrEqual(50);
+
+  let low = peak;
+  const shrinkDeadline = Date.now() + 60_000;
+  while (Date.now() < shrinkDeadline && low >= peak - 20) {
+    const value = await readBloomPercent();
+    if (value !== null) low = Math.min(low, value);
+    await page.waitForTimeout(1_000);
+  }
+  expect(low, `expected the bloom reading to shrink back down from its peak of ${peak}%, but it stayed at ${low}%`).toBeLessThan(peak - 20);
 
   expect(errors).toEqual([]);
 });

@@ -158,6 +158,13 @@ pub struct SceneLayout {
     pub lamp_off_tint: [f32; 3],
     pub lamp_on_tint: [f32; 3],
 
+    /// The tabletop's own scale — its top edge is positioned at the pot's
+    /// own bottom (see `render/mod.rs`'s `render`), and it's drawn wide
+    /// enough at this scale to fill the frame at any zoom/pan the room's
+    /// `dynamic_zoom_for_room` ever reaches, including a viewport zoomed in
+    /// close on a single plant.
+    pub table_scale: f32,
+
     pub pot_scale: f32,
     pub soil_scale: f32,
     pub seed_scale: f32,
@@ -170,6 +177,14 @@ pub struct SceneLayout {
     /// The terminal bloom's mesh scale — see `scene::flower_transform` and
     /// `sim::config::PlantConfig::flowering_height_threshold`.
     pub flower_scale: f32,
+    /// Floor on the bloom's own scale (as a fraction of `flower_scale`)
+    /// once the plant is mature enough to flower at all — see
+    /// `scene::flower_transform`. A real flowering-age plant shows a small
+    /// closed bud between bloom flushes; it doesn't vanish to nothing the
+    /// way `Plant::bloom_intensity` hitting exactly 0.0 between cycles
+    /// otherwise would render as. Same idiom as `leaf_visual`'s own
+    /// `maturity.max(0.05)` floor, just for the bloom instead of a leaf.
+    pub bud_min_intensity: f32,
 
     /// Width of the optional climbing-support pole/lattice (see
     /// `scene::trellis_transform`, `sim::config::PlantConfig::
@@ -374,6 +389,8 @@ impl Default for SceneLayout {
             lamp_falloff: 5.0,
             lamp_off_tint: [0.35, 0.32, 0.28],
             lamp_on_tint: [1.3, 1.15, 0.7],
+
+            table_scale: 0.02,
             pot_scale: 0.01,
             soil_scale: 0.01,
             seed_scale: 0.01,
@@ -381,6 +398,9 @@ impl Default for SceneLayout {
             cotyledon_scale: 0.012,
             cotyledon_spread_angle: 0.4,
             flower_scale: 0.009,
+            // A visibly small closed bud, not a hair-thin sliver — roughly
+            // a real bud's own proportion relative to its fully-open bloom.
+            bud_min_intensity: 0.12,
             trellis_width_scale: 0.004,
             trellis_x_offset: 0.03,
             vine_trellis_lean_angle: 0.45,

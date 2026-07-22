@@ -1180,12 +1180,16 @@ pub struct TimeConfig {
     pub sim_seconds_per_real_second: f64,
     /// How many sim-seconds make one full day/night cycle.
     pub day_length_sim_seconds: f64,
+    /// Multiplier converting elapsed clock time into physiological time.
+    /// Keep this at 1.0 for the fast gameplay preset; the realistic preset
+    /// scales processes down while retaining a 24-hour solar cycle.
+    pub physiology_rate_multiplier: f64,
 }
 
 impl Default for TimeConfig {
     fn default() -> Self {
-        // 400 sim-seconds/day at 80 sim-seconds per real second is a
-        // 5-real-second day/night cycle. The only consumer of this default
+        // 400 sim-seconds/day at 20 sim-seconds per real second is a
+        // 20-real-second day/night cycle. The only consumer of this default
         // today is the `web/` demo, whose job is validating the engine —
         // seeing germination, growth, day/night lighting, and crown
         // branching play out within a short session — not final gameplay
@@ -1193,19 +1197,39 @@ impl Default for TimeConfig {
         // there's an actual gameplay-tuned config (and ideally a UI time
         // scale control) distinct from this validation default.
         TimeConfig {
-            sim_seconds_per_real_second: 80.0,
+            sim_seconds_per_real_second: 20.0,
             day_length_sim_seconds: 400.0,
+            physiology_rate_multiplier: 1.0,
         }
     }
 }
 
 impl TimeConfig {
+    /// A 24-hour solar cycle whose plant/soil rates preserve the default
+    /// gameplay preset's amount of physiology per simulated day. This is a
+    /// calibration-ready baseline: replace individual rates with measured
+    /// values without changing display pacing or day length again.
+    pub fn realistic() -> Self {
+        let gameplay = Self::default();
+        let day_length_sim_seconds = 86_400.0;
+        TimeConfig {
+            sim_seconds_per_real_second: 1.0,
+            day_length_sim_seconds,
+            physiology_rate_multiplier: gameplay.day_length_sim_seconds / day_length_sim_seconds,
+        }
+    }
+
+    /// Converts elapsed simulation-clock seconds into the time used by
+    /// plant, soil, humidity, and pest processes.
+    pub fn physiology_dt(&self, sim_dt: f64) -> f64 {
+        sim_dt.max(0.0) * self.physiology_rate_multiplier.max(0.0)
+    }
     /// Sane bounds for a runtime speed control (e.g. a UI slider), relative
     /// to `Default::default()`'s own pace — low enough the sim doesn't
     /// effectively freeze, high enough it doesn't blow past every discrete
     /// event in a single frame's `dt` and become meaningless to watch.
     pub const MIN_SPEED_MULTIPLIER: f64 = 0.25;
-    pub const MAX_SPEED_MULTIPLIER: f64 = 5.0;
+    pub const MAX_SPEED_MULTIPLIER: f64 = 20.0;
 
     /// Clamps a requested speed multiplier into that range — used by
     /// `Simulation::set_time_scale` so a UI slider (or a malformed direct
@@ -1308,4 +1332,24 @@ pub struct GrowthConfig {
     pub pest: PestConfig,
     pub season: SeasonConfig,
     pub moon: MoonConfig,
+}
+
+impl GrowthConfig {
+    /// Configuration for long-running, real-time-scale simulations. The
+    /// default remains the intentionally fast gameplay preset.
+    pub fn realistic() -> Self {
+        let time = TimeConfig::realistic();
+        GrowthConfig {
+            time,
+            season: SeasonConfig {
+                season_length_sim_seconds: 365.25 * time.day_length_sim_seconds,
+                ..SeasonConfig::default()
+            },
+            moon: MoonConfig {
+                cycle_length_sim_seconds: 29.530588853 * time.day_length_sim_seconds,
+                ..MoonConfig::default()
+            },
+            ..GrowthConfig::default()
+        }
+    }
 }

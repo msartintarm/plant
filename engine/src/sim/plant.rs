@@ -709,6 +709,29 @@ pub struct Plant {
     /// exactly once at the tick `stage` becomes `Stage::Dead` and never
     /// cleared afterward. See `DeathCause`.
     pub death_cause: Option<DeathCause>,
+    /// Cumulative leaves ever spawned over this plant's life — main stem
+    /// and every branch, including ones later shed by senescence or cut off
+    /// by pruning. Distinct from the *current* leaf count (`leaves.len()`
+    /// plus each branch's own): see `max_leaves_at_once` for the concurrent
+    /// high-water mark. Monotonically increasing — a scoring metric, not a
+    /// live gauge.
+    pub leaves_produced_total: u32,
+    /// Highest concurrent leaf count (main stem + every branch) this plant
+    /// has ever held at once — a running high-water mark, unlike the
+    /// current count itself, which drops as leaves senesce or get pruned.
+    /// Monotonically increasing.
+    pub max_leaves_at_once: u32,
+    /// Tallest `height` this plant has ever reached — a running high-water
+    /// mark that survives `height` itself dropping back down (taking a
+    /// cutting shortens the parent; pruning shortens whatever it cuts).
+    /// Monotonically increasing.
+    pub max_height_reached: f64,
+    /// Sim-seconds this plant has spent anywhere other than `Stage::Dead`.
+    /// Unlike `total_time` (which keeps accumulating after death — see its
+    /// own doc comment), this freezes the instant `stage` becomes
+    /// `Stage::Dead`, so it reads as "how long it lived," not "how long
+    /// it's existed."
+    pub alive_duration: f64,
     /// Chosen once, at germination — eases elongation toward zero as
     /// height/branch-length approach `PlantConfig::realistic_max_height`
     /// (see `realistic_scale_taper`) instead of today's default unbounded
@@ -748,6 +771,10 @@ impl Default for Plant {
             starvation_timer: 0.0,
             total_time: 0.0,
             death_cause: None,
+            leaves_produced_total: 0,
+            max_leaves_at_once: 0,
+            max_height_reached: 0.0,
+            alive_duration: 0.0,
             realistic_scale: false,
         }
     }
@@ -896,6 +923,7 @@ impl Plant {
             Side::Left => Side::Right,
             Side::Right => Side::Left,
         };
+        self.leaves_produced_total += 1;
     }
 
     fn spawn_branch(&mut self) {
@@ -954,6 +982,9 @@ impl Plant {
                         &mut branch.next_leaf_side,
                     )
                 };
+                if spawned {
+                    self.leaves_produced_total += 1;
+                }
                 spawned_this_round = spawned_this_round || spawned;
             }
             // Advances every round regardless of whether it spawned
@@ -992,12 +1023,18 @@ impl Plant {
         if dt <= 0.0 {
             return;
         }
+        // Day/night and season advance on the simulation clock; biological
+        // processes use the independently configurable physiology clock.
+        let physiology_dt = config.time.physiology_dt(dt);
         self.total_time += dt;
+        if self.stage != Stage::Dead {
+            self.alive_duration += dt;
+        }
         match self.stage {
-            Stage::Seed => self.step_seed(dt, climate, soil, &config.plant, &config.soil),
-            Stage::Sprout => self.step_sprout(dt, climate, soil, &config.plant, &config.soil),
+            Stage::Seed => self.step_seed(physiology_dt, climate, soil, &config.plant, &config.soil),
+            Stage::Sprout => self.step_sprout(physiology_dt, climate, soil, &config.plant, &config.soil),
             Stage::Vegetative => self.step_vegetative(
-                dt,
+                physiology_dt,
                 sun,
                 climate,
                 soil,
@@ -1010,6 +1047,13 @@ impl Plant {
             ),
             // Terminal — see `Stage::Dead`'s doc comment.
             Stage::Dead => {}
+        }
+        if self.height > self.max_height_reached {
+            self.max_height_reached = self.height;
+        }
+        let leaf_count = self.leaves.len() + self.branches.iter().map(|b| b.leaves.len()).sum::<usize>();
+        if leaf_count as u32 > self.max_leaves_at_once {
+            self.max_leaves_at_once = leaf_count as u32;
         }
     }
 
@@ -1790,11 +1834,13 @@ impl Plant {
             stage: Stage::Vegetative,
             height: plant.cutting_start_height,
             carbon_pool: plant.cutting_start_carbon,
+            max_height_reached: plant.cutting_start_height,
             ..Plant::default()
         };
         for _ in 0..plant.cutting_start_leaves {
             fresh.spawn_leaf();
         }
+        fresh.max_leaves_at_once = fresh.leaves.len() as u32;
         fresh
     }
 
@@ -3661,6 +3707,101 @@ mod tests {
         assert_eq!(plant.death_cause, Some(DeathCause::Starvation));
     }
 
+    // --- Scoring metrics ------------------------------------------------------
+
+    #[test]
+    fn spawning_a_leaf_increments_leaves_produced_total_and_never_decrements_it() {
+        let mut plant = Plant::new();
+        plant.spawn_leaf();
+        plant.spawn_leaf();
+        assert_eq!(plant.leaves_produced_total, 2);
+        plant.leaves.clear(); // simulates pruning/senescence removing leaves
+        assert_eq!(
+            plant.leaves_produced_total, 2,
+            "expected the lifetime total to survive leaves later being removed"
+        );
+    }
+
+    #[test]
+    fn spawn_due_leaves_fairly_increments_leaves_produced_total_for_every_leaf_it_spawns() {
+        let config = config();
+        let mut plant = Plant { height: 10.0, carbon_pool: 1000.0, branches: vec![Branch::new(0.0, Side::Left)], ..Plant::new() };
+        plant.branches[0].height = 10.0;
+        let spawned = plant.spawn_due_leaves_fairly(&config.plant);
+        assert!(spawned, "expected a tall stem with ample carbon to actually grow at least one leaf");
+        let total_leaves = plant.leaves.len() + plant.branches[0].leaves.len();
+        assert_eq!(
+            plant.leaves_produced_total, total_leaves as u32,
+            "expected the lifetime counter to match exactly how many leaves this call actually spawned"
+        );
+    }
+
+    #[test]
+    fn max_leaves_at_once_records_a_high_water_mark_that_survives_losing_leaves_later() {
+        let config = config();
+        let mut plant = Plant {
+            stage: Stage::Vegetative,
+            leaves: vec![mature_leaf(Side::Left), mature_leaf(Side::Right), mature_leaf(Side::Left)],
+            ..Plant::new()
+        };
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let sun = noon(&config);
+        plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+        assert_eq!(plant.max_leaves_at_once, 3);
+        plant.leaves.truncate(1);
+        plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+        assert_eq!(
+            plant.max_leaves_at_once, 3,
+            "expected the high-water mark to survive losing leaves, not track the current count"
+        );
+    }
+
+    #[test]
+    fn max_height_reached_records_a_high_water_mark_that_survives_pruning() {
+        let config = config();
+        let mut plant =
+            Plant { stage: Stage::Vegetative, height: 5.0, leaves: vec![mature_leaf(Side::Left)], ..Plant::new() };
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let sun = noon(&config);
+        plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+        assert!(plant.max_height_reached >= 5.0);
+        let peak = plant.max_height_reached;
+        plant.height = 1.0; // simulates a prune/cutting shortening it
+        plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+        assert_eq!(
+            plant.max_height_reached, peak,
+            "expected the high-water mark to survive height dropping back down"
+        );
+    }
+
+    #[test]
+    fn alive_duration_freezes_at_death_while_total_time_keeps_accumulating() {
+        let config = config();
+        let mut plant = Plant {
+            stage: Stage::Vegetative,
+            leaves: vec![mature_leaf(Side::Left)],
+            root_health: 0.0001,
+            waterlogged_duration: config.soil.waterlog_grace_period + 1.0,
+            ..Plant::new()
+        };
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let sun = noon(&config);
+        plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+        assert_eq!(plant.stage, Stage::Dead);
+        let alive_at_death = plant.alive_duration;
+        let total_at_death = plant.total_time;
+        plant.step(10.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+        assert_eq!(
+            plant.alive_duration, alive_at_death,
+            "expected alive_duration to freeze once the plant is dead"
+        );
+        assert_eq!(
+            plant.total_time,
+            total_at_death + 10.0,
+            "expected total_time to keep accumulating after death, unlike alive_duration"
+        );
+    }
+
     #[test]
     fn a_plant_with_leaves_never_dies_of_starvation_even_when_carbon_routinely_hits_zero_at_night() {
         // Regression test: carbon_pool sitting at its zero floor is a
@@ -4045,6 +4186,15 @@ mod tests {
         assert_eq!(
             fresh.stem_radius, 0.0,
             "expected a fresh cutting to start with no accumulated stem thickness"
+        );
+        assert_eq!(
+            fresh.max_height_reached, config.plant.cutting_start_height,
+            "expected the propagated plant's own high-water mark to start from its own starting height, not zero"
+        );
+        assert_eq!(fresh.max_leaves_at_once, config.plant.cutting_start_leaves as u32);
+        assert_eq!(
+            fresh.leaves_produced_total, config.plant.cutting_start_leaves as u32,
+            "expected the propagated plant's own lifetime counter to start from its own starting leaves, not the parent's"
         );
     }
 

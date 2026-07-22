@@ -387,3 +387,93 @@
   color: #7dd3fc;
 }
 
+/* The scores/challenges dropdown — same floating-card treatment as
+   .seedInfoPanel, but left-aligned text and wide enough for a challenge
+   label to read comfortably, since (unlike the seed-info panel) its content
+   isn't all short enough to justify nowrap. */
+.scoresPanel {
+  padding: 0.5rem 0.7rem;
+  border-radius: 4px;
+  background: rgba(15, 15, 20, 0.85);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #cbd5e1;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  width: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.scoresPanelTitle {
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.62rem;
+  margin: 0.5rem 0 0.25rem;
+}
+
+.scoresPanelTitle:first-child {
+  margin-top: 0;
+}
+
+.scoreRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.challengeList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.challengeItem {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  opacity: 0.6;
+}
+
+.challengeItemDone {
+  opacity: 1;
+  color: #86efac;
+}
+
+/* One per plant (see Simulation::plant_pot_hud) — anchored at its own
+   pot's projected screen position and nudged down/centered so it reads as
+   sitting just below that specific pot, not the settings HUD's shared,
+   selected-plant-only water row. */
+.potWaterBadge {
+  position: absolute;
+  transform: translate(-50%, 0.5rem);
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 6px;
+  background: rgba(15, 15, 20, 0.6);
+  backdrop-filter: blur(3px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  font-family: ui-monospace, monospace;
+  font-size: 0.65rem;
+  white-space: nowrap;
+}
+
+.lampHotspot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+}
+

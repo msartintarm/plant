@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatHeight, formatNutrient, formatPercent, formatTemperature, formatTimeOfDay } from "./formatStats";
+import { formatDays, formatHeight, formatNutrient, formatPercent, formatTemperature, formatTimeOfDay } from "./formatStats";
 
 describe("formatTimeOfDay", () => {
   it("maps 0 to midnight", () => {
@@ -73,5 +73,16 @@ describe("formatTemperature", () => {
 
   it("handles negative values", () => {
     expect(formatTemperature(-2.3)).toBe("-2°C");
+  });
+});
+
+describe("formatDays", () => {
+  it("shows one decimal place", () => {
+    expect(formatDays(3)).toBe("3.0d");
+    expect(formatDays(0.5)).toBe("0.5d");
+  });
+
+  it("floors slightly-negative float rounding at zero", () => {
+    expect(formatDays(-0.0000001)).toBe("0.0d");
   });
 });

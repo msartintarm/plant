@@ -36,6 +36,13 @@ export function formatTemperature(temperatureC: number): string {
   return `${Math.round(temperatureC)}°C`;
 }
 
+/// One decimal place, like `formatHeight` — `Stats::alive_days`/high-score
+/// day counts are fractional (a plant that's lived half a plant-day reads
+/// as "0.5d", not rounded away to "0d" or "1d").
+export function formatDays(days: number): string {
+  return `${Math.max(0, days).toFixed(1)}d`;
+}
+
 /// Like `formatPercent`, but deliberately *not* clamped above 100% — soil
 /// nutrient (`Stats::nutrient_level`) has no hard ceiling the way water's
 /// field capacity does (see `SoilConfig::max_nutrient`), so showing it climb

@@ -244,6 +244,30 @@ pub fn decode_pick_target(rgba: [u8; 4]) -> Option<PickTarget> {
 /// still letting a genuinely nearer *neighboring* instance's own draw beat
 /// this one fairly. `tint` is a plain parameter, not something this
 /// function decides on its own.
+/// The `[x, y]` delta `outline_uniform` adds on top of a mesh's own `scale`
+/// so its outline halo renders `SceneLayout::outline_pixel_width` pixels
+/// bigger on every side than the mesh itself — factored out so `render::
+/// mod`'s GPU pick pass can give a leaf/stem-segment's clickable hitbox this
+/// *exact same* margin (see `render::mod::wgpu_engine::write_pick_
+/// transform`), matching whichever outline (white idle halo or
+/// `SceneLayout::hover_outline_tint`'s red hover one) is actually visible
+/// around it, rather than a hitbox that stops at the plain mesh's own
+/// (smaller, invisible) edge.
+pub fn outline_scale_margin(local_half_extent: (f32, f32), aspect: f32, canvas_width_px: f32, layout: &SceneLayout) -> [f32; 2] {
+    if canvas_width_px <= 0.0 {
+        return [0.0, 0.0];
+    }
+    // Clip space spans -1..1 (2.0 total) across `canvas_width_px` physical
+    // pixels in x; y's own per-pixel clip delta is `aspect` times bigger/
+    // smaller than x's (see `InstanceUniform::from_transform`'s own aspect
+    // handling), hence `margin_clip_y`.
+    let margin_clip_x = 2.0 * layout.outline_pixel_width / canvas_width_px;
+    let margin_clip_y = margin_clip_x * aspect;
+    let margin_x = if local_half_extent.0 > 0.0 { margin_clip_x / local_half_extent.0 } else { 0.0 };
+    let margin_y = if local_half_extent.1 > 0.0 { margin_clip_y / local_half_extent.1 } else { 0.0 };
+    [margin_x, margin_y]
+}
+
 pub fn outline_uniform(
     t: &Transform,
     aspect: f32,
@@ -256,18 +280,9 @@ pub fn outline_uniform(
 ) -> InstanceUniform {
     let looked = apply_depth_look(t, depth, layout);
     let mut uniform = InstanceUniform::from_transform(&looked, aspect, zoom, depth + layout.outline_depth_bias);
-    if canvas_width_px > 0.0 {
-        // Clip space spans -1..1 (2.0 total) across `canvas_width_px`
-        // physical pixels in x; y's own per-pixel clip delta is `aspect`
-        // times bigger/smaller than x's (see `InstanceUniform::
-        // from_transform`'s own aspect handling), hence `margin_clip_y`.
-        let margin_clip_x = 2.0 * layout.outline_pixel_width / canvas_width_px;
-        let margin_clip_y = margin_clip_x * aspect;
-        let margin_x = if local_half_extent.0 > 0.0 { margin_clip_x / local_half_extent.0 } else { 0.0 };
-        let margin_y = if local_half_extent.1 > 0.0 { margin_clip_y / local_half_extent.1 } else { 0.0 };
-        uniform.scale[0] += margin_x;
-        uniform.scale[1] += margin_y;
-    }
+    let margin = outline_scale_margin(local_half_extent, aspect, canvas_width_px, layout);
+    uniform.scale[0] += margin[0];
+    uniform.scale[1] += margin[1];
     uniform.tint = tint;
     uniform
 }
@@ -880,6 +895,21 @@ pub fn plant_slot_base_anchor(layout: &SceneLayout, plant_index: usize) -> [f32;
     [layout.pot_anchor[0] + plant_index as f32 * layout.plant_slot_spacing, layout.pot_anchor[1]]
 }
 
+/// A specific plant slot's actual world-space pot anchor — `plant_slot_
+/// base_anchor` stepped sideways for `plant_index`, then shifted by that
+/// plant's own `pot_position` slider (see `pot_anchor_for_position`).
+/// Doesn't include camera pan or the `* zoom` `InstanceUniform::from_
+/// transform` applies — see `render::mod::wgpu_engine::render`'s own
+/// `effective_pot_anchor`/`pan` handling for that, which this exists to be
+/// the single source of truth for (both the actual render loop and
+/// `Simulation::plant_pot_hud`, which projects this same anchor into CSS-
+/// pixel space for the per-pot water gauge, call this instead of each
+/// separately re-deriving it).
+pub fn plant_pot_world_anchor(layout: &SceneLayout, plant_index: usize, pot_position: f64) -> [f32; 2] {
+    let base = plant_slot_base_anchor(layout, plant_index);
+    pot_anchor_for_position(base, pot_position, layout.pot_position_x_travel)
+}
+
 /// Multiplies the stem mesh's own baked color as `Plant::root_health` drops
 /// — a distinct visual channel from leaf senescence (see `SceneLayout::
 /// stem_unhealthy_tint`'s doc comment on why root damage needs its own
@@ -1031,14 +1061,31 @@ pub fn branch_curve<'a>(main_stem: &StemCurve, branch: &'a Branch, layout: &Scen
 ///
 /// `bloom_intensity` (0.0..1.0, see `Plant::bloom_intensity`) scales the
 /// whole bloom directly — a real flower opens/closes gradually in size,
-/// not just fades in place, and at 0.0 this renders as a zero-area mesh
-/// (i.e. invisible) without needing a separate height-threshold check here
-/// too: `bloom_intensity` is already 0 whenever the plant isn't currently
-/// in bloom (see `bloom_intensity_target`), so the two checks would only
-/// ever duplicate each other.
-pub fn flower_transform(curve: &StemCurve, total_height: f64, bloom_intensity: f64, layout: &SceneLayout) -> Transform {
+/// not just fades in place. Floored at `layout.bud_min_intensity` once
+/// `mature_enough` (the plant has reached `PlantConfig::
+/// flowering_height_threshold` at least once) rather than left to reach
+/// exactly 0.0 between bloom flushes — see that field's own doc comment:
+/// a real flowering-age plant keeps a small closed bud visible while
+/// resting, it doesn't disappear and reappear from nothing every cycle.
+/// Still exactly zero pre-maturity (`!mature_enough`) — a plant that's
+/// never reached flowering height hasn't formed any bud yet to show, the
+/// one case this doesn't just duplicate `bloom_intensity_target` already
+/// being 0 there (rather than reading `flowering_height_threshold` itself,
+/// which lives in `PlantConfig`, not this render-only `SceneLayout`).
+pub fn flower_transform(
+    curve: &StemCurve,
+    total_height: f64,
+    bloom_intensity: f64,
+    mature_enough: bool,
+    layout: &SceneLayout,
+) -> Transform {
     let frame = frame_at_height(curve, total_height, layout);
-    let scale = layout.flower_scale * bloom_intensity.clamp(0.0, 1.0) as f32;
+    let effective_intensity = if mature_enough {
+        (bloom_intensity.clamp(0.0, 1.0) as f32).max(layout.bud_min_intensity)
+    } else {
+        0.0
+    };
+    let scale = layout.flower_scale * effective_intensity;
     Transform {
         offset: frame.offset,
         scale_x: scale,
@@ -1868,6 +1915,20 @@ mod tests {
     }
 
     #[test]
+    fn plant_pot_world_anchor_matches_slot_base_anchor_when_pot_position_is_neutral() {
+        let layout = SceneLayout::default();
+        assert_eq!(plant_pot_world_anchor(&layout, 1, 0.0), plant_slot_base_anchor(&layout, 1));
+    }
+
+    #[test]
+    fn plant_pot_world_anchor_combines_the_slots_own_sideways_step_with_its_pot_position_shift() {
+        let layout = SceneLayout::default();
+        let combined = plant_pot_world_anchor(&layout, 2, 1.0);
+        let expected = pot_anchor_for_position(plant_slot_base_anchor(&layout, 2), 1.0, layout.pot_position_x_travel);
+        assert_eq!(combined, expected);
+    }
+
+    #[test]
     fn ambient_tint_matches_night_floor_and_sun_color_at_the_extremes() {
         let layout = SceneLayout::default();
         let night = ambient_tint(&sun(0.5, -1.0), &layout);
@@ -2115,7 +2176,7 @@ mod tests {
         plant.height = 3.0;
         let curve = curve_for_plant(&plant);
 
-        let flower = flower_transform(&curve, plant.height, 1.0, &layout);
+        let flower = flower_transform(&curve, plant.height, 1.0, true, &layout);
         let leaf_at_tip = leaf_transform_in_frame(
             &curve,
             &Leaf {
@@ -2153,20 +2214,52 @@ mod tests {
 
         // No history recorded yet, so the tip (where the flower sits) uses
         // today's live lean + droop.
-        let flower = flower_transform(&curve, plant.height, 1.0, &layout);
+        let flower = flower_transform(&curve, plant.height, 1.0, true, &layout);
         assert!((flower.rotation - 0.3).abs() < 1e-6);
     }
 
     #[test]
-    fn flower_transform_scales_directly_with_bloom_intensity() {
+    fn flower_transform_scales_directly_with_bloom_intensity_once_mature() {
         let layout = SceneLayout::default();
         let curve = curve_at_origin();
-        let closed = flower_transform(&curve, 1.0, 0.0, &layout);
-        let half_open = flower_transform(&curve, 1.0, 0.5, &layout);
-        let fully_open = flower_transform(&curve, 1.0, 1.0, &layout);
-        assert_eq!(closed.scale_x, 0.0, "fully closed should render as zero-size (invisible)");
+        let half_open = flower_transform(&curve, 1.0, 0.5, true, &layout);
+        let fully_open = flower_transform(&curve, 1.0, 1.0, true, &layout);
         assert_eq!(fully_open.scale_x, layout.flower_scale);
         assert!((half_open.scale_x - layout.flower_scale * 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn flower_transform_floors_a_mature_plants_resting_bloom_at_a_small_visible_bud_not_zero() {
+        // A real flowering-age plant keeps a small closed bud visible
+        // between bloom flushes rather than vanishing entirely — see
+        // `SceneLayout::bud_min_intensity`'s own doc comment.
+        let layout = SceneLayout::default();
+        let curve = curve_at_origin();
+        let resting = flower_transform(&curve, 1.0, 0.0, true, &layout);
+        assert_eq!(resting.scale_x, layout.flower_scale * layout.bud_min_intensity);
+        assert!(resting.scale_x > 0.0, "expected a mature plant's resting bloom to still be visible");
+    }
+
+    #[test]
+    fn flower_transform_does_not_let_the_bud_floor_shrink_an_already_larger_intensity() {
+        let layout = SceneLayout::default();
+        let curve = curve_at_origin();
+        // Comfortably above `bud_min_intensity` (0.12 by default) so the
+        // floor should be a no-op here.
+        let opening = flower_transform(&curve, 1.0, 0.3, true, &layout);
+        assert!((opening.scale_x - layout.flower_scale * 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn flower_transform_stays_zero_before_the_plant_is_mature_enough_to_have_a_bud_at_all() {
+        let layout = SceneLayout::default();
+        let curve = curve_at_origin();
+        // Even a nonzero `bloom_intensity` shouldn't matter pre-maturity —
+        // `bloom_intensity_target` already keeps it at 0 there in practice,
+        // but `flower_transform` shouldn't rely on that alone (see its own
+        // doc comment).
+        let immature = flower_transform(&curve, 1.0, 1.0, false, &layout);
+        assert_eq!(immature.scale_x, 0.0, "expected no bud at all before the plant has ever reached flowering height");
     }
 
     #[test]
