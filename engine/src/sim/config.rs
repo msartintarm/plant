@@ -258,14 +258,27 @@ pub struct HumidityConfig {
     /// (see `Humidity::update`) — real warm air holds (and loses) more
     /// moisture capacity than cool air.
     pub decay_rate_per_sec: f64,
-    /// The temperature `PlantConfig::respiration_rate`-style baseline the
-    /// VPD multiplier is centered on — at or below this, humidity has no
-    /// extra effect on transpiration at all (VPD only meaningfully
-    /// accelerates transpiration once the air is *both* warm and dry).
+    /// Reference temperature used only to scale the rate at which misted
+    /// room air returns toward `dry_air_floor` (see `Humidity::update`).
+    /// It is deliberately separate from VPD: dry air produces a vapor-
+    /// pressure deficit at ordinary room temperatures too.
     pub vpd_reference_temperature_c: f64,
-    /// How strongly heat above the reference temperature amplifies
-    /// transpiration in dry air — see `Humidity::vpd_factor`.
+    /// VPD (kPa) at which `vpd_strength` applies. Around 1 kPa is a useful
+    /// indoor baseline for a well-watered tropical houseplant.
+    pub vpd_reference_kpa: f64,
+    /// Additional transpiration multiplier at `vpd_reference_kpa`; scales
+    /// linearly with the physically calculated vapor-pressure deficit. See
+    /// `Humidity::vpd_factor`.
     pub vpd_strength: f64,
+    /// VPD (kPa) at which stomata have completed half of their configurable
+    /// closure response. This is a species-independent interim heuristic;
+    /// species traits can replace it with calibrated curves later.
+    pub stomatal_vpd_closure_kpa: f64,
+    /// Residual fraction of a well-watered leaf's conductance at extreme
+    /// VPD. Root-water limitation can still reduce conductance all the way
+    /// to zero; this floor only prevents atmospheric closure from becoming
+    /// an instantaneous hard switch.
+    pub stomatal_min_conductance: f64,
 }
 
 impl Default for HumidityConfig {
@@ -275,7 +288,13 @@ impl Default for HumidityConfig {
             dry_air_floor: 0.5,
             decay_rate_per_sec: 0.0004,
             vpd_reference_temperature_c: 24.0,
-            vpd_strength: 0.6,
+            vpd_reference_kpa: 1.0,
+            vpd_strength: 0.15,
+            // Deliberately broad until species-specific response curves are
+            // calibrated: normal indoor VPD should trim conductance without
+            // making the accelerated demo's baseline plant non-viable.
+            stomatal_vpd_closure_kpa: 8.0,
+            stomatal_min_conductance: 0.1,
         }
     }
 }

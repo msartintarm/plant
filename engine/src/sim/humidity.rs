@@ -39,18 +39,53 @@ impl Humidity {
         self.level = self.level.clamp(0.0, 1.0);
     }
 
-    /// Vapor-pressure-deficit-style multiplier on transpiration: hot *and*
-    /// dry air pulls dramatically more water out of leaves than either
-    /// factor alone — exactly 1.0 (no adjustment) at or below `vpd_
-    /// reference_temperature_c`, or whenever humidity is already at 1.0
-    /// (fully saturated air has no additional pull left to add), growing
-    /// with both how much hotter than the reference it is and how dry the
-    /// air currently is.
+    /// Saturation vapor pressure (kPa) from air temperature using the FAO-56
+    /// Tetens approximation. This is the pressure of water vapor in fully
+    /// saturated air at `temperature_c`; actual indoor RH determines how
+    /// much of that capacity is already occupied.
+    pub fn saturation_vapor_pressure_kpa(temperature_c: f64) -> f64 {
+        0.6108 * (17.27 * temperature_c / (temperature_c + 237.3)).exp()
+    }
+
+    /// Vapor-pressure deficit (kPa): the gap between saturated air and the
+    /// air's actual water-vapor pressure. Unlike the previous heuristic, it
+    /// is nonzero whenever RH is below 100%, including at normal indoor
+    /// temperatures.
+    pub fn vapor_pressure_deficit_kpa(&self, temperature_c: f64) -> f64 {
+        let relative_humidity = self.level.clamp(0.0, 1.0);
+        Self::saturation_vapor_pressure_kpa(temperature_c) * (1.0 - relative_humidity)
+    }
+
+    /// VPD-driven multiplier on transpiration. The multiplier is neutral at
+    /// saturation, then rises with the physically calculated VPD relative to
+    /// the configured reference. Stomatal closure remains a future model
+    /// extension; this function only expresses the atmospheric pull on a
+    /// transpiring, well-watered leaf.
     pub fn vpd_factor(&self, temperature_c: f64, config: &HumidityConfig) -> f64 {
-        let heat_above_ref =
-            ((temperature_c - config.vpd_reference_temperature_c) / config.vpd_reference_temperature_c).max(0.0);
-        let dryness = 1.0 - self.level.clamp(0.0, 1.0);
-        1.0 + config.vpd_strength * heat_above_ref * dryness
+        let reference = config.vpd_reference_kpa.max(1e-9);
+        1.0 + config.vpd_strength * self.vapor_pressure_deficit_kpa(temperature_c) / reference
+    }
+
+    /// Fraction of maximum stomatal conductance available to the leaf. Dry
+    /// roots restrict opening directly; high VPD closes stomata progressively
+    /// to conserve water. The same output must gate both CO2 assimilation
+    /// and transpiration so the two processes cannot diverge.
+    pub fn stomatal_conductance_factor(
+        &self,
+        root_water_factor: f64,
+        temperature_c: f64,
+        config: &HumidityConfig,
+    ) -> f64 {
+        let root_opening = root_water_factor.clamp(0.0, 1.0);
+        let closure_scale = config.stomatal_vpd_closure_kpa.max(1e-9);
+        let vpd = self.vapor_pressure_deficit_kpa(temperature_c);
+        // A squared response keeps modest indoor VPD near the open state
+        // while still producing a strong closure response once VPD reaches
+        // the configured half-closure scale.
+        let vpd_ratio = vpd / closure_scale;
+        let vpd_opening = 1.0 / (1.0 + vpd_ratio * vpd_ratio);
+        let residual = config.stomatal_min_conductance.clamp(0.0, 1.0);
+        root_opening * (residual + (1.0 - residual) * vpd_opening)
     }
 }
 
@@ -94,13 +129,17 @@ mod tests {
     }
 
     #[test]
-    fn vpd_factor_is_neutral_at_or_below_the_reference_temperature_regardless_of_humidity() {
-        let config = config();
+    fn saturation_vapor_pressure_matches_a_known_room_temperature_value() {
+        let saturation = Humidity::saturation_vapor_pressure_kpa(20.0);
+        assert!((saturation - 2.338).abs() < 0.01, "expected about 2.338 kPa at 20 C, got {saturation}");
+    }
+
+    #[test]
+    fn vpd_is_nonzero_in_dry_air_at_ordinary_room_temperature() {
         let dry = Humidity { level: 0.0 };
-        let humid = Humidity { level: 1.0 };
-        assert_eq!(dry.vpd_factor(config.vpd_reference_temperature_c, &config), 1.0);
-        assert_eq!(humid.vpd_factor(config.vpd_reference_temperature_c, &config), 1.0);
-        assert_eq!(dry.vpd_factor(config.vpd_reference_temperature_c - 5.0, &config), 1.0);
+        let vpd = dry.vapor_pressure_deficit_kpa(20.0);
+        assert!((vpd - 2.338).abs() < 0.01, "expected dry-air VPD near saturation pressure, got {vpd}");
+        assert!(dry.vpd_factor(20.0, &config()) > 1.0);
     }
 
     #[test]
@@ -115,8 +154,8 @@ mod tests {
     fn vpd_factor_rises_with_heat_in_dry_air() {
         let config = config();
         let dry = Humidity { level: 0.0 };
-        let mild = dry.vpd_factor(config.vpd_reference_temperature_c + 5.0, &config);
-        let hot = dry.vpd_factor(config.vpd_reference_temperature_c + 15.0, &config);
+        let mild = dry.vpd_factor(20.0, &config);
+        let hot = dry.vpd_factor(35.0, &config);
         assert!(hot > mild, "expected more heat to pull transpiration up further: {hot} vs {mild}");
         assert!(mild > 1.0);
     }
@@ -131,5 +170,16 @@ mod tests {
             dry.vpd_factor(hot_temp, &config) > humid.vpd_factor(hot_temp, &config),
             "expected dry air to amplify transpiration more than humid air at the same heat"
         );
+    }
+
+    #[test]
+    fn stomata_close_under_high_vpd_but_close_fully_when_roots_are_dry() {
+        let config = config();
+        let humid = Humidity { level: 0.95 };
+        let dry = Humidity { level: 0.1 };
+        let humid_opening = humid.stomatal_conductance_factor(1.0, 25.0, &config);
+        let dry_opening = dry.stomatal_conductance_factor(1.0, 25.0, &config);
+        assert!(dry_opening < humid_opening, "high VPD should close stomata: dry {dry_opening}, humid {humid_opening}");
+        assert_eq!(dry.stomatal_conductance_factor(0.0, 25.0, &config), 0.0);
     }
 }

@@ -533,6 +533,10 @@ pub enum Decision {
         /// `step_vegetative`. Equal to `water_factor` whenever roots are
         /// fully healthy and not yet pot-bound.
         effective_water_factor: f64,
+        /// Shared stomatal opening factor, constrained by both effective
+        /// root water and atmospheric VPD. Gates photosynthesis and
+        /// transpiration together.
+        stomatal_conductance: f64,
         root_health: f64,
         pest_infestation: f64,
         /// `season::season_state` this tick — 1.0 at midsummer, dropping
@@ -1165,7 +1169,14 @@ impl Plant {
         let stress_signal =
             leaf_stress_signal(effective_water_factor, climate.temperature_c, self.pest_infestation, plant);
 
-        // Photosynthesis: gated by light AND water AND temperature AND
+        let humidity = Humidity { level: humidity_level };
+        let stomatal_conductance = humidity.stomatal_conductance_factor(
+            effective_water_factor,
+            climate.temperature_c,
+            humidity_cfg,
+        );
+
+        // Photosynthesis: gated by light AND stomatal conductance AND temperature AND
         // nutrient availability together (Liebig's law of the minimum,
         // extended to a second resource), further taxed by pest damage —
         // abundant light with closed (drought/root-damage-stressed)
@@ -1175,7 +1186,7 @@ impl Plant {
         let photosynthesis = photosynthesis_area
             * sun.intensity
             * plant.light_use_efficiency
-            * effective_water_factor
+            * stomatal_conductance
             * temp_factor
             * nutrient_factor
             * pest_factor;
@@ -1209,16 +1220,17 @@ impl Plant {
             self.starvation_timer = 0.0;
         }
 
-        // Transpiration ~ stomatal opening, which scales with light and
-        // available water — this is what both depletes soil moisture and
+        // Transpiration ~ stomatal opening, which is shared with
+        // photosynthesis above so atmospheric/root stress cannot increase
+        // water loss while leaving CO2 uptake unconstrained. This depletes soil moisture and
         // (via cumulative_water_uptake below) drives stem thickening. Also
         // scaled by vapor-pressure deficit (hot *and* dry air pulls
         // dramatically more water out of leaves than either factor alone —
         // see `Humidity::vpd_factor`), the temperature-scaling this used to
         // deliberately omit before humidity existed as a mechanic.
-        let vpd_factor = Humidity { level: humidity_level }.vpd_factor(climate.temperature_c, humidity_cfg);
+        let vpd_factor = humidity.vpd_factor(climate.temperature_c, humidity_cfg);
         let uptake_rate =
-            lit_leaf_area * sun.intensity * effective_water_factor * plant.transpiration_coeff * vpd_factor;
+            lit_leaf_area * sun.intensity * stomatal_conductance * plant.transpiration_coeff * vpd_factor;
         self.cumulative_water_uptake += uptake_rate * dt;
         soil.update(dt, sun.intensity, uptake_rate, soil_cfg);
 
@@ -1425,6 +1437,7 @@ impl Plant {
             sun_azimuth: sun.azimuth,
             water_factor,
             effective_water_factor,
+            stomatal_conductance,
             root_health: self.root_health,
             pest_infestation: self.pest_infestation,
             dormancy_factor,
