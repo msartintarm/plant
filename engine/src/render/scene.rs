@@ -596,16 +596,18 @@ pub fn sky_object_transform(sun: &SunState, layout: &SceneLayout, aspect: f32) -
     }
 }
 
-/// The moon's own on-screen position, mirrored from wherever the sun
-/// currently sits — shown diagonally opposite it rather than tracing an
-/// independent arc that could visually coincide with it. Mirrors azimuth
-/// and elevation-factor within the same 0..1 domain `sky_object_transform`
-/// already maps (reflecting through 1.0, not 0), so the result always
-/// stays inside the same in-bounds range the sun's own position does.
-pub fn moon_position_opposite_sun(sun: &SunState) -> SunState {
+/// The moon's own on-screen position — diagonally opposite the sun's
+/// general direction rather than tracing an independent arc that could
+/// visually coincide with it. Built from `day_progress` directly (not
+/// `SunState::azimuth`, which holds flat outside daytime and jumps at the
+/// day/night wrap) so this sweeps continuously across the full 24-hour
+/// cycle with no freeze or snap. `sun_elevation` (the sun's own, which
+/// unlike its azimuth never holds) still drives how high the mirrored
+/// position sits.
+pub fn moon_position_opposite_sun(day_progress: f64, sun_elevation: f64) -> SunState {
     SunState {
-        elevation: 1.0 - sun.elevation.abs().clamp(0.0, 1.0),
-        azimuth: 1.0 - sun.azimuth.clamp(0.0, 1.0),
+        elevation: 1.0 - sun_elevation.abs().clamp(0.0, 1.0),
+        azimuth: (day_progress + 0.5).rem_euclid(1.0),
         intensity: 0.0,
         color: NO_TINT,
     }
@@ -1072,20 +1074,9 @@ pub fn branch_curve<'a>(main_stem: &StemCurve, branch: &'a Branch, layout: &Scen
 /// one case this doesn't just duplicate `bloom_intensity_target` already
 /// being 0 there (rather than reading `flowering_height_threshold` itself,
 /// which lives in `PlantConfig`, not this render-only `SceneLayout`).
-pub fn flower_transform(
-    curve: &StemCurve,
-    total_height: f64,
-    bloom_intensity: f64,
-    mature_enough: bool,
-    layout: &SceneLayout,
-) -> Transform {
+pub fn flower_transform(curve: &StemCurve, total_height: f64, bloom_intensity: f64, layout: &SceneLayout) -> Transform {
     let frame = frame_at_height(curve, total_height, layout);
-    let effective_intensity = if mature_enough {
-        (bloom_intensity.clamp(0.0, 1.0) as f32).max(layout.bud_min_intensity)
-    } else {
-        0.0
-    };
-    let scale = layout.flower_scale * effective_intensity;
+    let scale = layout.flower_scale * bloom_intensity.clamp(0.0, 1.0) as f32;
     Transform {
         offset: frame.offset,
         scale_x: scale,
@@ -1260,18 +1251,24 @@ mod tests {
     }
 
     #[test]
-    fn moon_position_opposite_sun_mirrors_azimuth_and_elevation() {
-        let sun = SunState { elevation: 0.3, azimuth: 0.2, intensity: 1.0, color: [1.0, 1.0, 1.0] };
-        let moon = moon_position_opposite_sun(&sun);
-        assert!((moon.azimuth - 0.8).abs() < 1e-6);
+    fn moon_position_opposite_sun_mirrors_elevation_and_offsets_azimuth_by_half_a_cycle() {
+        let moon = moon_position_opposite_sun(0.2, 0.3);
+        assert!((moon.azimuth - 0.7).abs() < 1e-6);
         assert!((moon.elevation - 0.7).abs() < 1e-6);
     }
 
     #[test]
+    fn moon_position_opposite_sun_azimuth_never_freezes_or_jumps_across_the_day_progress_wrap() {
+        let just_before_wrap = moon_position_opposite_sun(0.999, 0.0);
+        let just_after_wrap = moon_position_opposite_sun(0.001, 0.0);
+        let delta = (just_after_wrap.azimuth - just_before_wrap.azimuth).rem_euclid(1.0);
+        assert!(delta < 0.01 || delta > 0.99, "azimuth should sweep smoothly across the wrap, not jump: {just_before_wrap:?} -> {just_after_wrap:?}");
+    }
+
+    #[test]
     fn moon_position_opposite_sun_stays_within_the_same_valid_range_at_the_extremes() {
-        for (elevation, azimuth) in [(0.0, 0.0), (1.0, 1.0), (-1.0, 0.0), (0.5, 0.5)] {
-            let sun = SunState { elevation, azimuth, intensity: 1.0, color: [1.0, 1.0, 1.0] };
-            let moon = moon_position_opposite_sun(&sun);
+        for (elevation, day_progress) in [(0.0, 0.0), (1.0, 1.0), (-1.0, 0.0), (0.5, 0.5)] {
+            let moon = moon_position_opposite_sun(day_progress, elevation);
             assert!((0.0..=1.0).contains(&moon.elevation));
             assert!((0.0..=1.0).contains(&moon.azimuth));
         }
@@ -2176,7 +2173,7 @@ mod tests {
         plant.height = 3.0;
         let curve = curve_for_plant(&plant);
 
-        let flower = flower_transform(&curve, plant.height, 1.0, true, &layout);
+        let flower = flower_transform(&curve, plant.height, 1.0, &layout);
         let leaf_at_tip = leaf_transform_in_frame(
             &curve,
             &Leaf {
@@ -2214,52 +2211,20 @@ mod tests {
 
         // No history recorded yet, so the tip (where the flower sits) uses
         // today's live lean + droop.
-        let flower = flower_transform(&curve, plant.height, 1.0, true, &layout);
+        let flower = flower_transform(&curve, plant.height, 1.0, &layout);
         assert!((flower.rotation - 0.3).abs() < 1e-6);
     }
 
     #[test]
-    fn flower_transform_scales_directly_with_bloom_intensity_once_mature() {
+    fn flower_transform_scales_directly_with_bloom_intensity() {
         let layout = SceneLayout::default();
         let curve = curve_at_origin();
-        let half_open = flower_transform(&curve, 1.0, 0.5, true, &layout);
-        let fully_open = flower_transform(&curve, 1.0, 1.0, true, &layout);
+        let closed = flower_transform(&curve, 1.0, 0.0, &layout);
+        let half_open = flower_transform(&curve, 1.0, 0.5, &layout);
+        let fully_open = flower_transform(&curve, 1.0, 1.0, &layout);
+        assert_eq!(closed.scale_x, 0.0, "fully closed should render as zero-size (invisible)");
         assert_eq!(fully_open.scale_x, layout.flower_scale);
         assert!((half_open.scale_x - layout.flower_scale * 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn flower_transform_floors_a_mature_plants_resting_bloom_at_a_small_visible_bud_not_zero() {
-        // A real flowering-age plant keeps a small closed bud visible
-        // between bloom flushes rather than vanishing entirely — see
-        // `SceneLayout::bud_min_intensity`'s own doc comment.
-        let layout = SceneLayout::default();
-        let curve = curve_at_origin();
-        let resting = flower_transform(&curve, 1.0, 0.0, true, &layout);
-        assert_eq!(resting.scale_x, layout.flower_scale * layout.bud_min_intensity);
-        assert!(resting.scale_x > 0.0, "expected a mature plant's resting bloom to still be visible");
-    }
-
-    #[test]
-    fn flower_transform_does_not_let_the_bud_floor_shrink_an_already_larger_intensity() {
-        let layout = SceneLayout::default();
-        let curve = curve_at_origin();
-        // Comfortably above `bud_min_intensity` (0.12 by default) so the
-        // floor should be a no-op here.
-        let opening = flower_transform(&curve, 1.0, 0.3, true, &layout);
-        assert!((opening.scale_x - layout.flower_scale * 0.3).abs() < 1e-6);
-    }
-
-    #[test]
-    fn flower_transform_stays_zero_before_the_plant_is_mature_enough_to_have_a_bud_at_all() {
-        let layout = SceneLayout::default();
-        let curve = curve_at_origin();
-        // Even a nonzero `bloom_intensity` shouldn't matter pre-maturity —
-        // `bloom_intensity_target` already keeps it at 0 there in practice,
-        // but `flower_transform` shouldn't rely on that alone (see its own
-        // doc comment).
-        let immature = flower_transform(&curve, 1.0, 1.0, false, &layout);
-        assert_eq!(immature.scale_x, 0.0, "expected no bud at all before the plant has ever reached flowering height");
     }
 
     #[test]

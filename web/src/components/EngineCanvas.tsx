@@ -155,7 +155,7 @@ const DRAG_THRESHOLD_PX = 4;
 const WATER_DOSE = 0.05;
 const FERTILIZE_DOSE = 0.3;
 const MIST_DOSE = 0.3;
-const DEFAULT_TIME_SCALE = 1.0;
+const DEFAULT_TIME_SCALE = 2.0;
 const DEFAULT_SPECIES = "dracaena";
 const SPECIES_OPTIONS: { value: string; label: string }[] = [
   { value: "dracaena", label: "Dracaena (branching)" },
@@ -306,6 +306,7 @@ export default function EngineCanvas() {
         if (loadCompletedChallenges().size >= CHALLENGES.length) {
           UNLOCKABLE_SPECIES.forEach((s) => created.grant_seed(s));
         }
+        created.set_time_scale(DEFAULT_TIME_SCALE);
         created.start();
         setStatus("ready");
       } catch (err) {

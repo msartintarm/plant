@@ -354,8 +354,6 @@ mod wgpu_engine {
         aerial_root_outline_drawables: Vec<Drawable>,
         seed_outline_drawable: Drawable,
         cotyledon_outline_drawables: [Drawable; 2],
-        /// Repointed alongside `flower_drawable` every frame — see `render`.
-        flower_outline_drawable: Drawable,
         stem_segment_outline_drawables: Vec<Drawable>,
         leaf_outline_drawables: Vec<Drawable>,
         /// One per leaf slot, tinted with that slot's flat pick-ID color
@@ -470,7 +468,6 @@ mod wgpu_engine {
             make_drawable("cotyledon", &scene::cotyledon_transform(layout, Side::Left)),
             make_drawable("cotyledon", &scene::cotyledon_transform(layout, Side::Right)),
         ];
-        let flower_outline_drawable = make_drawable(plant_config.flower_mesh_name, &zero_transform);
         let roots_outline_drawable = make_drawable("roots", &zero_transform);
         let aerial_root_outline_drawables =
             (0..MAX_AERIAL_ROOTS).map(|_| make_drawable("aerial_root", &zero_transform)).collect();
@@ -503,7 +500,6 @@ mod wgpu_engine {
             aerial_root_outline_drawables,
             seed_outline_drawable,
             cotyledon_outline_drawables,
-            flower_outline_drawable,
             stem_segment_outline_drawables,
             leaf_outline_drawables,
             leaf_pick_drawables,
@@ -1258,16 +1254,38 @@ mod wgpu_engine {
             sky_transform.offset[0] += pan[0];
             sky_transform.offset[1] += pan[1];
             write_transform(&self.queue, &self.sun_drawable, &sky_transform, aspect, zoom, self.scene_layout.background_depth, &self.scene_layout);
-            // Shown diagonally opposite wherever the sun currently sits
-            // (see `scene::moon_position_opposite_sun`) rather than tracing
-            // its own independent arc, which could otherwise visually
-            // coincide with the sun now that both can be up at once (see
-            // `moon::arc_position`'s phase-linked timing). `moon_elevation`
-            // (from that phase-linked arc, computed above) still gates
-            // whether it's shown/contributes light at all — just not where
-            // it's drawn.
-            let moon_position = scene::moon_position_opposite_sun(&sun_state);
+            // Shown diagonally opposite the sun's general direction (see
+            // `scene::moon_position_opposite_sun`) rather than tracing its
+            // own independent arc, which could otherwise visually coincide
+            // with the sun now that both can be up at once (see `moon::
+            // arc_position`'s phase-linked timing). `moon_elevation` (from
+            // that phase-linked arc, computed above) still gates whether
+            // it's shown/contributes light at all — just not where it's
+            // drawn. Built from `self.day_progress` directly, not
+            // `sun_state.azimuth` (which holds flat outside daytime and
+            // jumps at the day/night wrap), so this sweeps continuously
+            // with no on-screen freeze or snap.
+            let moon_position = scene::moon_position_opposite_sun(self.day_progress, sun_state.elevation);
             let mut moon_sky_transform = scene::sky_object_transform(&moon_position, &self.scene_layout, aspect);
+            // The crescent's own tilt (below) needs a matching continuous
+            // stand-in for "where the sun is" — `sky_transform` itself is
+            // built from the same holding/jumping `sun_state.azimuth`, which
+            // would otherwise carry that same freeze/snap into the crescent
+            // shape. Computed from the un-panned positions (camera drag
+            // shouldn't rotate the crescent), before `pan` is folded into
+            // `moon_sky_transform` below for the actual draw.
+            let continuous_sun_direction = sun::SunState {
+                elevation: sun_state.elevation,
+                azimuth: self.day_progress.rem_euclid(1.0),
+                intensity: 0.0,
+                color: [1.0, 1.0, 1.0],
+            };
+            let continuous_sun_position = scene::sky_object_transform(&continuous_sun_direction, &self.scene_layout, aspect);
+            let crescent_tilt = moon::crescent_tilt_angle(
+                (moon_sky_transform.offset[0] as f64, moon_sky_transform.offset[1] as f64),
+                (continuous_sun_position.offset[0] as f64, continuous_sun_position.offset[1] as f64),
+                self.growth_config.moon.observer_latitude_degrees,
+            ) as f32;
             moon_sky_transform.offset[0] += pan[0];
             moon_sky_transform.offset[1] += pan[1];
             // A real daytime moon isn't darker, it just loses contrast
@@ -1276,11 +1294,6 @@ mod wgpu_engine {
             moon_sky_transform.tint =
                 scene::daytime_fade(moon_sky_transform.tint, ambient, lit_sun_state.intensity, self.scene_layout.moon_daytime_fade_strength);
             write_transform(&self.queue, &self.moon_drawable, &moon_sky_transform, aspect, zoom, self.scene_layout.background_depth, &self.scene_layout);
-            let crescent_tilt = moon::crescent_tilt_angle(
-                (moon_sky_transform.offset[0] as f64, moon_sky_transform.offset[1] as f64),
-                (sky_transform.offset[0] as f64, sky_transform.offset[1] as f64),
-                self.growth_config.moon.observer_latitude_degrees,
-            ) as f32;
             let mut shadow_transform =
                 scene::moon_shadow_transform(&moon_sky_transform, &moon_appearance, crescent_tilt, &self.scene_layout, aspect);
             shadow_transform.tint =
@@ -1576,38 +1589,10 @@ mod wgpu_engine {
                 }
                 slot.aerial_roots_drawn = aerial_root_slot;
 
-                // Repointed every frame to whichever mesh this species' own
-                // bloom actually looks like (see `PlantConfig::flower_mesh_
-                // name`) — cheap, since `Drawable::mesh` is just a lookup
-                // key, not an owned GPU resource, so switching species at
-                // runtime (`set_species`) never needs a new buffer. Always
-                // drawn (see the render pass below) — `flower_transform`
-                // itself scales it to exactly zero size pre-maturity, and to
-                // its own `SceneLayout::bud_min_intensity` floor (not zero)
-                // once mature but currently resting between bloom flushes.
                 slot.flower_drawable.mesh = slot.plant_config.flower_mesh_name;
-                slot.flower_outline_drawable.mesh = slot.plant_config.flower_mesh_name;
-                let mature_enough_to_have_a_bud = slot.plant.height >= slot.plant_config.flowering_height_threshold;
-                let flower_transform = scene::flower_transform(
-                    &main_curve,
-                    slot.plant.height,
-                    slot.plant.bloom_intensity,
-                    mature_enough_to_have_a_bud,
-                    layout,
-                );
+                let flower_transform =
+                    scene::flower_transform(&main_curve, slot.plant.height, slot.plant.bloom_intensity, layout);
                 write_transform(&self.queue, &slot.flower_drawable, &flower_transform, aspect, zoom, layout.plant_depth, layout);
-                write_outline_transform(
-                    &self.queue,
-                    &self.meshes,
-                    &slot.flower_outline_drawable,
-                    &flower_transform,
-                    aspect,
-                    zoom,
-                    canvas_width_px,
-                    layout.plant_depth,
-                    base_outline_tint,
-                    layout,
-                );
 
                 // Leaves fill the shared pool main-stem-first, then branch
                 // by branch — see the `leaf_drawables` field doc. `shade_
@@ -1923,10 +1908,6 @@ mod wgpu_engine {
                             draw(&slot.aerial_root_outline_drawables[i]);
                             draw(&slot.aerial_root_drawables[i]);
                         }
-                        // Always drawn — `bloom_intensity` already scales
-                        // it to zero size (invisible) whenever not in
-                        // bloom.
-                        draw(&slot.flower_outline_drawable);
                         draw(&slot.flower_drawable);
                     }
                     for i in 0..slot.leaves_drawn {
