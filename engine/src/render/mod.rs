@@ -1226,6 +1226,8 @@ mod wgpu_engine {
             // night.
             let ambient = scene::ambient_tint(&lit_sun_state, &self.scene_layout);
             let base_outline_tint = scene::outline_tint_for_sun(sun_state.intensity, &self.scene_layout);
+            let prune_glow = self.active_tool == Some(Tool::Prune);
+            let trim_glow = self.active_tool == Some(Tool::Trim);
             // The slow year-long cycle, layered on the wall itself — a
             // genuinely "wall-integrated" way to show the current season
             // (distinct from `ambient`'s day/night tint, which stays on the
@@ -1512,7 +1514,13 @@ mod wgpu_engine {
                     let hovered = self.hovered_target.get() == Some(scene::PickTarget::StemSegment { plant_index, slot: segment_slot });
                     let display_transform =
                         if hovered { scene::apply_hover_scale(transform, layout) } else { *transform };
-                    let outline_tint = if hovered { layout.hover_outline_tint } else { base_outline_tint };
+                    let outline_tint = if hovered {
+                        layout.hover_outline_tint
+                    } else if trim_glow {
+                        base_outline_tint
+                    } else {
+                        transform.tint
+                    };
                     write_transform(&self.queue, &slot.stem_segment_drawables[segment_slot], &display_transform, aspect, zoom, layout.plant_depth, layout);
                     write_outline_transform(
                         &self.queue,
@@ -1621,7 +1629,13 @@ mod wgpu_engine {
                     let hovered = self.hovered_target.get() == Some(scene::PickTarget::Leaf { plant_index, slot: leaf_slot });
                     let display_transform =
                         if hovered { scene::apply_hover_scale(&transform, layout) } else { transform };
-                    let outline_tint = if hovered { layout.hover_outline_tint } else { base_outline_tint };
+                    let outline_tint = if hovered {
+                        layout.hover_outline_tint
+                    } else if prune_glow {
+                        base_outline_tint
+                    } else {
+                        transform.tint
+                    };
                     slot.leaf_drawables[leaf_slot].mesh = slot.plant_config.leaf_mesh_name;
                     slot.leaf_outline_drawables[leaf_slot].mesh = slot.plant_config.leaf_mesh_name;
                     slot.leaf_pick_drawables[leaf_slot].mesh = slot.plant_config.leaf_mesh_name;
@@ -1681,7 +1695,13 @@ mod wgpu_engine {
                         let hovered = self.hovered_target.get() == Some(scene::PickTarget::StemSegment { plant_index, slot: segment_slot });
                         let display_transform =
                             if hovered { scene::apply_hover_scale(transform, layout) } else { *transform };
-                        let outline_tint = if hovered { layout.hover_outline_tint } else { base_outline_tint };
+                        let outline_tint = if hovered {
+                            layout.hover_outline_tint
+                        } else if trim_glow {
+                            base_outline_tint
+                        } else {
+                            transform.tint
+                        };
                         write_transform(&self.queue, &slot.stem_segment_drawables[segment_slot], &display_transform, aspect, zoom, layout.plant_depth, layout);
                         write_outline_transform(
                             &self.queue,
@@ -1720,7 +1740,13 @@ mod wgpu_engine {
                         let hovered = self.hovered_target.get() == Some(scene::PickTarget::Leaf { plant_index, slot: leaf_slot });
                         let display_transform =
                             if hovered { scene::apply_hover_scale(&leaf_transform, layout) } else { leaf_transform };
-                        let outline_tint = if hovered { layout.hover_outline_tint } else { base_outline_tint };
+                        let outline_tint = if hovered {
+                            layout.hover_outline_tint
+                        } else if prune_glow {
+                            base_outline_tint
+                        } else {
+                            leaf_transform.tint
+                        };
                         slot.leaf_drawables[leaf_slot].mesh = slot.plant_config.leaf_mesh_name;
                         slot.leaf_outline_drawables[leaf_slot].mesh = slot.plant_config.leaf_mesh_name;
                         slot.leaf_pick_drawables[leaf_slot].mesh = slot.plant_config.leaf_mesh_name;

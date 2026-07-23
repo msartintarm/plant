@@ -445,6 +445,23 @@
   color: #86efac;
 }
 
+.resetProgressButton {
+  margin-top: 0.5rem;
+  width: 100%;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #f87171;
+  background: rgba(248, 113, 113, 0.15);
+  color: #fca5a5;
+  font: inherit;
+  font-size: 0.65rem;
+  cursor: pointer;
+}
+
+.resetProgressButton:hover {
+  background: rgba(248, 113, 113, 0.3);
+}
+
 /* One per plant (see Simulation::plant_pot_hud) — anchored at its own
    pot's projected screen position and nudged down/centered so it reads as
    sitting just below that specific pot, not the settings HUD's shared,

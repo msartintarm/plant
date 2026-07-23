@@ -557,6 +557,13 @@ export default function EngineCanvas() {
     simRef.current?.restart();
   }
 
+  function handleResetProgress() {
+    if (!window.confirm("Erase all saved high scores and challenge progress?")) return;
+    saveHighScores({ maxHeightReached: 0, maxLeavesAtOnce: 0, leavesProducedTotal: 0, aliveDays: 0 });
+    saveCompletedChallenges(new Set());
+    window.location.reload();
+  }
+
   function handlePotPositionChange(e: React.ChangeEvent<HTMLInputElement>) {
     const value = Number(e.target.value);
     setPotPosition(value);
@@ -803,6 +810,9 @@ export default function EngineCanvas() {
                     </li>
                   ))}
                 </ul>
+                <button type="button" onClick={handleResetProgress} className={styles.resetProgressButton}>
+                  Reset progress
+                </button>
               </div>
             )}
           </div>
