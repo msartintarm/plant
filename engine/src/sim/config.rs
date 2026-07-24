@@ -433,10 +433,8 @@ pub struct PlantConfig {
     // --- Photosynthesis / carbon ---
     /// Photosynthetic yield per unit leaf area per unit light intensity.
     pub light_use_efficiency: f64,
-    /// Cotyledons are photosynthetic organs themselves (in epigeal
-    /// germination) — gives the seedling *some* carbon income immediately
-    /// on sprouting, before its first true leaf exists.
     pub cotyledon_leaf_area: f64,
+    pub cotyledon_fade_over_leaves: f64,
     /// Leaf area a single fully mature true leaf contributes.
     pub leaf_area_per_leaf: f64,
     // --- Light availability by height (spatial, distinct from the
@@ -594,6 +592,7 @@ pub struct PlantConfig {
     /// Baked leaf mesh name — same per-frame repoint mechanism as
     /// `flower_mesh_name` below.
     pub leaf_mesh_name: &'static str,
+    pub cotyledon_mesh_name: &'static str,
 
     // --- Flowering (purely cosmetic — a terminal bloom that cycles open
     // and closed once the plant is mature enough, see `Plant::
@@ -795,36 +794,16 @@ pub struct PlantConfig {
     /// How much `growth_shock` a single repot adds.
     pub repot_shock_amount: f64,
 
-    // --- Propagation (see `Plant::take_cutting`/`Plant::from_cutting`) — a
-    // real stem cutting: snipping off a piece of the growing tip costs the
-    // parent plant some height (`cutting_cost_height_fraction`, the same
-    // "remove the tip, release lateral buds" mechanics `cut_main_stem_to`
-    // already models for pruning) and produces a separate, storable item
-    // (see `render::mod::CuttingItem`) a player can later plant into its own
-    // pot/`PlantSlot` — a real second, independently-growing specimen, not
-    // a substitute for the mother plant. ---
-    /// Minimum height before a cutting can be taken — a cutting has to
-    /// actually have a node/internode to root from.
+    // --- Propagation ---
     pub cutting_min_height: f64,
-    /// Fraction of the parent's current height removed by taking a cutting —
-    /// `Plant::take_cutting`'s own cost, applied via the same `cut_main_
-    /// stem_to` mechanics `prune_main_stem` uses (shed leaves/aerial roots/
-    /// branches above the cut, release lateral buds, growth shock). Smaller
-    /// than `prune_height_fraction` by default: taking one cutting is a
-    /// lighter touch than a full prune, even though the mechanism is
-    /// identical.
+    pub cutting_min_root_health: f64,
     pub cutting_cost_height_fraction: f64,
-    /// The propagated plant's starting height, immediately in `Stage::
-    /// Vegetative` (a rooted cutting skips germination/sprouting entirely —
-    /// it's already-differentiated tissue, not a seed) — see `Plant::from_
-    /// cutting`.
     pub cutting_start_height: f64,
-    /// The propagated plant's starting carbon reserve — real cuttings root
-    /// using their own stored reserves before establishing enough leaf area
-    /// to feed themselves, the same reasoning as `sprout_growth_rate`.
     pub cutting_start_carbon: f64,
-    /// How many starter leaves the propagated cutting begins with.
     pub cutting_start_leaves: usize,
+    pub rooting_duration: f64,
+    pub rooting_duration_realistic: f64,
+    pub division_min_leaves: usize,
 
     // --- Dormancy (see `season::season_state`) ---
     /// How much winter's shorter days suppress elongation — multiplies
@@ -862,8 +841,9 @@ impl PlantConfig {
             realistic_max_height: 5.5,
             ambient_light_floor: 0.15,
 
-            light_use_efficiency: 0.05,
+            light_use_efficiency: 0.08,
             cotyledon_leaf_area: 0.4,
+            cotyledon_fade_over_leaves: 3.0,
             leaf_area_per_leaf: 1.0,
             respiration_rate: 0.008,
 
@@ -916,6 +896,7 @@ impl PlantConfig {
 
             growth_habit: GrowthHabit::UprightCane,
             leaf_mesh_name: "leaf",
+            cotyledon_mesh_name: "cotyledon_dracaena",
 
             flowering_height_threshold: 0.6,
             flower_mesh_name: "flower_dracaena",
@@ -971,10 +952,14 @@ impl PlantConfig {
             repot_shock_amount: 0.35,
 
             cutting_min_height: 1.0,
+            cutting_min_root_health: 0.5,
             cutting_cost_height_fraction: 0.15,
             cutting_start_height: 0.05,
             cutting_start_carbon: 2.0,
             cutting_start_leaves: 1,
+            rooting_duration: 400.0,
+            rooting_duration_realistic: 16800.0,
+            division_min_leaves: 6,
 
             dormancy_elongation_sensitivity: 1.0,
         }
@@ -998,10 +983,9 @@ impl PlantConfig {
             base_elongation_rate: 0.0003,
             plastochron_height_interval: 0.011,
             max_branches: 0,
-            cutting_min_height: 0.08,
-            cutting_start_height: 0.01,
             growth_habit: GrowthHabit::BasalRosette,
             leaf_mesh_name: "leaf_peace_lily",
+            cotyledon_mesh_name: "cotyledon_peace_lily",
             // A squat rosette's own "stem" (the compressed crown) never
             // gets tall enough for this to matter functionally once
             // `max_branches` is 0, but keep it consistent with the scaled-
@@ -1046,6 +1030,7 @@ impl PlantConfig {
             max_branches: 2,
             growth_habit: GrowthHabit::Vine,
             leaf_mesh_name: "leaf_pothos",
+            cotyledon_mesh_name: "cotyledon_pothos",
             // A real trained Pothos keeps trailing well past its own
             // support once it outgrows it (see `trellis_height: Some(3.0)`
             // above) — several times that support's own height.
@@ -1058,6 +1043,7 @@ impl PlantConfig {
             // Pothos bloom looks like a smaller version of a Peace Lily's,
             // not at all like Dracaena's star-flowered panicle.
             flower_mesh_name: "flower_peace_lily",
+            rooting_duration_realistic: 4400.0,
             ..PlantConfig::dracaena()
         }
     }
@@ -1132,6 +1118,13 @@ mod species_tests {
         assert_ne!(dracaena.leaf_mesh_name, peace_lily.leaf_mesh_name);
         assert_ne!(dracaena.leaf_mesh_name, pothos.leaf_mesh_name);
         assert_ne!(peace_lily.leaf_mesh_name, pothos.leaf_mesh_name);
+
+        assert_eq!(dracaena.cotyledon_mesh_name, "cotyledon_dracaena");
+        assert_eq!(peace_lily.cotyledon_mesh_name, "cotyledon_peace_lily");
+        assert_eq!(pothos.cotyledon_mesh_name, "cotyledon_pothos");
+        assert_ne!(dracaena.cotyledon_mesh_name, peace_lily.cotyledon_mesh_name);
+        assert_ne!(dracaena.cotyledon_mesh_name, pothos.cotyledon_mesh_name);
+        assert_ne!(peace_lily.cotyledon_mesh_name, pothos.cotyledon_mesh_name);
 
         assert_eq!(dracaena.growth_habit, GrowthHabit::UprightCane);
         assert_eq!(peace_lily.growth_habit, GrowthHabit::BasalRosette);
@@ -1318,6 +1311,19 @@ mod tests {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EconomyConfig {
+    pub starting_balance: f64,
+    pub water_price_per_unit: f64,
+    pub auto_water_activation_cost: f64,
+}
+
+impl Default for EconomyConfig {
+    fn default() -> Self {
+        EconomyConfig { starting_balance: 100.0, water_price_per_unit: 2.0, auto_water_activation_cost: 10.0 }
+    }
+}
+
 /// Everything the growth simulation needs, bundled so callers pass one
 /// value instead of four.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -1332,6 +1338,7 @@ pub struct GrowthConfig {
     pub pest: PestConfig,
     pub season: SeasonConfig,
     pub moon: MoonConfig,
+    pub economy: EconomyConfig,
 }
 
 impl GrowthConfig {

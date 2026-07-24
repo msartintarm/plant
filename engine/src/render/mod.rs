@@ -353,7 +353,6 @@ mod wgpu_engine {
         roots_outline_drawable: Drawable,
         aerial_root_outline_drawables: Vec<Drawable>,
         seed_outline_drawable: Drawable,
-        cotyledon_outline_drawables: [Drawable; 2],
         stem_segment_outline_drawables: Vec<Drawable>,
         leaf_outline_drawables: Vec<Drawable>,
         /// One per leaf slot, tinted with that slot's flat pick-ID color
@@ -444,8 +443,8 @@ mod wgpu_engine {
 
         let seed_drawable = make_drawable("seed", &scene::seed_transform(layout, 0.0));
         let cotyledon_drawables = [
-            make_drawable("cotyledon", &scene::cotyledon_transform(layout, Side::Left)),
-            make_drawable("cotyledon", &scene::cotyledon_transform(layout, Side::Right)),
+            make_drawable(plant_config.cotyledon_mesh_name, &scene::cotyledon_transform(layout, Side::Left)),
+            make_drawable(plant_config.cotyledon_mesh_name, &scene::cotyledon_transform(layout, Side::Right)),
         ];
 
         let plant = initial_plant;
@@ -464,10 +463,6 @@ mod wgpu_engine {
         let leaf_drawables = (0..MAX_LEAVES).map(|_| make_drawable("leaf", &zero_transform)).collect();
 
         let seed_outline_drawable = make_drawable("seed", &scene::seed_transform(layout, 0.0));
-        let cotyledon_outline_drawables = [
-            make_drawable("cotyledon", &scene::cotyledon_transform(layout, Side::Left)),
-            make_drawable("cotyledon", &scene::cotyledon_transform(layout, Side::Right)),
-        ];
         let roots_outline_drawable = make_drawable("roots", &zero_transform);
         let aerial_root_outline_drawables =
             (0..MAX_AERIAL_ROOTS).map(|_| make_drawable("aerial_root", &zero_transform)).collect();
@@ -499,7 +494,6 @@ mod wgpu_engine {
             roots_outline_drawable,
             aerial_root_outline_drawables,
             seed_outline_drawable,
-            cotyledon_outline_drawables,
             stem_segment_outline_drawables,
             leaf_outline_drawables,
             leaf_pick_drawables,
@@ -677,11 +671,13 @@ mod wgpu_engine {
         /// any specific `PlantSlot`, so it survives that plant later dying,
         /// being pruned further, or `reset_plant` replacing it entirely.
         inventory: Vec<InventoryItem>,
+        balance: f64,
     }
 
     struct InventoryItem {
         species_name: String,
         from_seed: bool,
+        cutting_vigor: f64,
     }
 
     impl GpuState {
@@ -1036,7 +1032,8 @@ mod wgpu_engine {
                 day_progress: 0.0,
                 session_time: 0.0,
                 last_timestamp: None,
-                inventory: vec![InventoryItem { species_name: "dracaena".to_string(), from_seed: true }],
+                inventory: vec![InventoryItem { species_name: "dracaena".to_string(), from_seed: true, cutting_vigor: 1.0 }],
+                balance: growth_config.economy.starting_balance,
             })
         }
 
@@ -1153,7 +1150,13 @@ mod wgpu_engine {
                     self.humidity.level,
                     &plant_growth_config,
                 );
-                plant_slot.soil.apply_auto_water(plant_slot.auto_water_enabled, &self.growth_config.soil);
+                let spent = plant_slot.soil.apply_auto_water(
+                    plant_slot.auto_water_enabled,
+                    self.balance,
+                    self.growth_config.economy.water_price_per_unit,
+                    &self.growth_config.soil,
+                );
+                self.balance -= spent;
             }
 
             // Every plant sharing the room renders simultaneously now (see
@@ -1397,22 +1400,17 @@ mod wgpu_engine {
                     base_outline_tint,
                     layout,
                 );
-                let cotyledon_transforms =
+                slot.cotyledon_drawables[0].mesh = slot.plant_config.cotyledon_mesh_name;
+                slot.cotyledon_drawables[1].mesh = slot.plant_config.cotyledon_mesh_name;
+                let cotyledon_fade = slot.plant.cotyledon_fade_fraction(&slot.plant_config) as f32;
+                let mut cotyledon_transforms =
                     [scene::cotyledon_transform(layout, Side::Left), scene::cotyledon_transform(layout, Side::Right)];
+                for transform in &mut cotyledon_transforms {
+                    transform.scale_x *= cotyledon_fade;
+                    transform.scale_y *= cotyledon_fade;
+                }
                 for i in 0..2 {
                     write_transform(&self.queue, &slot.cotyledon_drawables[i], &cotyledon_transforms[i], aspect, zoom, layout.plant_depth, layout);
-                    write_outline_transform(
-                        &self.queue,
-                        &self.meshes,
-                        &slot.cotyledon_outline_drawables[i],
-                        &cotyledon_transforms[i],
-                        aspect,
-                        zoom,
-                        canvas_width_px,
-                        layout.plant_depth,
-                        base_outline_tint,
-                        layout,
-                    );
                 }
 
                 // The root mass, visible through the pot's hollow outline —
@@ -1890,9 +1888,7 @@ mod wgpu_engine {
                         draw(&slot.seed_outline_drawable);
                         draw(&slot.seed_drawable);
                     } else {
-                        draw(&slot.cotyledon_outline_drawables[0]);
                         draw(&slot.cotyledon_drawables[0]);
-                        draw(&slot.cotyledon_outline_drawables[1]);
                         draw(&slot.cotyledon_drawables[1]);
                         // Drawn right after the pot/soil (see the
                         // background loop above) and before the stem —
@@ -2089,7 +2085,6 @@ mod wgpu_engine {
         /// 0.0..1.0, wraps at midnight.
         pub day_progress: f64,
         pub is_daytime: bool,
-        /// "Seed" | "Sprout" | "Vegetative" | "Dead".
         pub stage: String,
         pub height: f64,
         /// Every leaf on the plant, main stem or branch.
@@ -2182,6 +2177,8 @@ mod wgpu_engine {
         /// `alive_duration` sensibly.
         pub alive_days: f64,
         pub bloom_intensity: f64,
+        pub rooting_progress: f64,
+        pub balance: f64,
     }
 
     /// A per-pot overlay reading for one plant — see `Simulation::
@@ -2274,30 +2271,29 @@ mod wgpu_engine {
             self.inner.borrow_mut().resize(width, height, device_pixel_ratio);
         }
 
-        /// Adds water to the soil (0.0-1.0, fraction of field capacity).
-        /// Watering far more often than the plant can draw the pot back
-        /// down keeps soil continuously saturated, which — sustained long
-        /// enough — starts real root damage (see `SoilConfig::
-        /// waterlogged_threshold`/`Plant::root_health`); this is
-        /// deliberately *not* clamped/rate-limited here, the same way a
-        /// real watering can doesn't stop a player from overdoing it.
-        pub fn water(&self, amount: f64) {
+        pub fn water(&self, amount: f64) -> bool {
             let mut state = self.inner.borrow_mut();
+            let cost = amount.max(0.0) * state.growth_config.economy.water_price_per_unit;
+            if state.balance < cost {
+                return false;
+            }
             let selected = state.selected_plant_index;
-            let Some(slot) = state.plants.get_mut(selected) else { return };
+            let Some(slot) = state.plants.get_mut(selected) else { return false };
             slot.soil.water(amount);
+            state.balance -= cost;
+            true
         }
 
-        /// Like `water`, but targets a specific plant by index regardless of
-        /// which one is currently selected — for the per-pot water button
-        /// (drawn under every pot at once, see `plant_pot_hud`), which
-        /// shouldn't also switch the settings HUD's own selection just
-        /// because the player watered a plant they weren't already looking
-        /// at. A no-op if `index` is out of range.
-        pub fn water_plant(&self, index: u32, amount: f64) {
+        pub fn water_plant(&self, index: u32, amount: f64) -> bool {
             let mut state = self.inner.borrow_mut();
-            let Some(slot) = state.plants.get_mut(index as usize) else { return };
+            let cost = amount.max(0.0) * state.growth_config.economy.water_price_per_unit;
+            if state.balance < cost {
+                return false;
+            }
+            let Some(slot) = state.plants.get_mut(index as usize) else { return false };
             slot.soil.water(amount);
+            state.balance -= cost;
+            true
         }
 
         /// Adds fertilizer (see `Soil::fertilize`) — a second resource with
@@ -2453,12 +2449,6 @@ mod wgpu_engine {
             slot.plant.repot(&plant_cfg)
         }
 
-        /// Takes a stem cutting from the selected plant — see `Plant::take_
-        /// cutting`'s own doc comment: costs that plant some height, like a
-        /// small prune, rather than resetting or replacing it. On success,
-        /// adds a `InventoryItem` to the room's shared inventory (see `plant_
-        /// cutting`, which later spends it on an actual new plant). Returns
-        /// whether it actually happened (a no-op if too short, or dead).
         pub fn take_cutting(&self) -> bool {
             let mut state = self.inner.borrow_mut();
             let selected = state.selected_plant_index;
@@ -2467,24 +2457,64 @@ mod wgpu_engine {
             let took_cutting = slot.plant.take_cutting(&plant_cfg);
             if took_cutting {
                 let species_name = slot.species_name.clone();
-                state.inventory.push(InventoryItem { species_name, from_seed: false });
+                let cutting_vigor = slot.plant.root_health;
+                state.inventory.push(InventoryItem { species_name, from_seed: false, cutting_vigor });
             }
             took_cutting
         }
 
-        /// How many stem cuttings are currently sitting in inventory,
-        /// waiting to be planted — see `take_cutting`/`plant_cutting`.
+        pub fn can_take_cutting(&self) -> bool {
+            let state = self.inner.borrow();
+            let selected = state.selected_plant_index;
+            let Some(slot) = state.plants.get(selected) else { return false };
+            slot.plant.is_propagatable(&slot.plant_config)
+        }
+
+        pub fn can_divide_plant(&self) -> bool {
+            let state = self.inner.borrow();
+            if state.plants.len() >= MAX_PLANTS {
+                return false;
+            }
+            let selected = state.selected_plant_index;
+            let Some(slot) = state.plants.get(selected) else { return false };
+            slot.plant.is_dividable(&slot.plant_config)
+        }
+
+        pub fn divide_plant(&self) -> bool {
+            let mut state = self.inner.borrow_mut();
+            if state.plants.len() >= MAX_PLANTS {
+                return false;
+            }
+            let selected = state.selected_plant_index;
+            let Some(slot) = state.plants.get_mut(selected) else { return false };
+            let plant_cfg = slot.plant_config;
+            let species_name = slot.species_name.clone();
+            let Some(offshoot) = slot.plant.divide(&plant_cfg) else { return false };
+            let aspect = state.config.width as f32 / state.config.height as f32;
+            let new_slot = build_plant_slot(
+                &state.device,
+                &state.instance_bind_group_layout,
+                aspect,
+                &state.scene_layout,
+                &state.growth_config,
+                plant_cfg,
+                offshoot,
+                species_name,
+            );
+            state.plants.push(new_slot);
+            state.selected_plant_index = state.plants.len() - 1;
+            true
+        }
+
         pub fn inventory_count(&self) -> u32 {
             self.inner.borrow().inventory.len() as u32
         }
 
         pub fn grant_seed(&self, species: &str) {
             let mut state = self.inner.borrow_mut();
-            state.inventory.push(InventoryItem { species_name: species.to_string(), from_seed: true });
+            state.inventory.push(InventoryItem { species_name: species.to_string(), from_seed: true, cutting_vigor: 1.0 });
         }
 
-        /// Which species a given inventory slot's cutting is, for an
-        /// inventory UI to label each one — "" if `index` is out of range.
         pub fn inventory_species(&self, index: u32) -> String {
             self.inner
                 .borrow()
@@ -2494,15 +2524,6 @@ mod wgpu_engine {
                 .unwrap_or_default()
         }
 
-        /// Spends one inventory item to grow a brand-new, independent plant
-        /// in its own pot along the windowsill (see `scene::plant_slot_
-        /// base_anchor`) — a no-op if `index` is out of range or the room
-        /// is already at `MAX_PLANTS`. A seed-sourced item (the room's
-        /// starting stock — see `GpuState::new`) germinates from scratch
-        /// (`Plant::new`); a cutting-sourced item (see `take_cutting`)
-        /// starts already-rooted (`Plant::from_cutting`), skipping
-        /// germination. Returns whether it actually happened; on success,
-        /// removes that item from inventory and selects the new plant.
         pub fn plant_cutting(&self, index: u32, realistic_scale: bool) -> bool {
             let mut state = self.inner.borrow_mut();
             if state.plants.len() >= MAX_PLANTS {
@@ -2513,11 +2534,12 @@ mod wgpu_engine {
             };
             let species_name = item.species_name.clone();
             let from_seed = item.from_seed;
+            let cutting_vigor = item.cutting_vigor;
             let plant_config = plant_config_for_species(&species_name);
             let plant = if from_seed {
                 Plant::new().with_realistic_scale(realistic_scale)
             } else {
-                Plant::from_cutting(&plant_config).with_realistic_scale(realistic_scale)
+                Plant::from_cutting(&plant_config, cutting_vigor).with_realistic_scale(realistic_scale)
             };
             let aspect = state.config.width as f32 / state.config.height as f32;
             let new_slot = build_plant_slot(
@@ -2547,21 +2569,23 @@ mod wgpu_engine {
             slot.pot_position_active = true;
         }
 
-        /// Toggles a self-watering-pot mode for the *currently selected*
-        /// plant only — see `Soil::apply_auto_water`/`PlantSlot::auto_
-        /// water_enabled`. While enabled, moisture never drops below
-        /// `SoilConfig::auto_water_floor` on its own, so a player doesn't
-        /// have to keep clicking Water to keep a fast-growing plant alive.
-        /// Note this no longer makes manual watering strictly obsolete: the
-        /// floor it maintains is comfortably below `SoilConfig::
-        /// waterlogged_threshold`, so auto-water itself never causes root
-        /// rot, but it also can't push moisture up for a thirsty plant the
-        /// way a deliberate watering dose can.
-        pub fn set_auto_water(&self, enabled: bool) {
+        pub fn set_auto_water(&self, enabled: bool) -> bool {
             let mut state = self.inner.borrow_mut();
             let selected = state.selected_plant_index;
-            let Some(slot) = state.plants.get_mut(selected) else { return };
+            let already_enabled = match state.plants.get(selected) {
+                Some(slot) => slot.auto_water_enabled,
+                None => return false,
+            };
+            if enabled && !already_enabled {
+                let cost = state.growth_config.economy.auto_water_activation_cost;
+                if state.balance < cost {
+                    return false;
+                }
+                state.balance -= cost;
+            }
+            let Some(slot) = state.plants.get_mut(selected) else { return false };
             slot.auto_water_enabled = enabled;
+            true
         }
 
         /// Switches growth habit (see `sim::config::plant_config_for_species`
@@ -2712,6 +2736,7 @@ mod wgpu_engine {
                 Stage::Seed => "Seed",
                 Stage::Sprout => "Sprout",
                 Stage::Vegetative => "Vegetative",
+                Stage::Rooting => "Rooting",
                 Stage::Dead => "Dead",
             };
             let branch_leaf_count: usize = slot.plant.branches.iter().map(|b| b.leaves.len()).sum();
@@ -2755,6 +2780,8 @@ mod wgpu_engine {
                 alive_duration: slot.plant.alive_duration,
                 alive_days: slot.plant.alive_duration / state.growth_config.time.day_length_sim_seconds,
                 bloom_intensity: slot.plant.bloom_intensity,
+                rooting_progress: slot.plant.rooting_progress(&slot.plant_config),
+                balance: state.balance,
             })
         }
     }

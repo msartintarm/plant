@@ -1062,18 +1062,9 @@ pub fn branch_curve<'a>(main_stem: &StemCurve, branch: &'a Branch, layout: &Scen
 /// full height would.
 ///
 /// `bloom_intensity` (0.0..1.0, see `Plant::bloom_intensity`) scales the
-/// whole bloom directly — a real flower opens/closes gradually in size,
-/// not just fades in place. Floored at `layout.bud_min_intensity` once
-/// `mature_enough` (the plant has reached `PlantConfig::
-/// flowering_height_threshold` at least once) rather than left to reach
-/// exactly 0.0 between bloom flushes — see that field's own doc comment:
-/// a real flowering-age plant keeps a small closed bud visible while
-/// resting, it doesn't disappear and reappear from nothing every cycle.
-/// Still exactly zero pre-maturity (`!mature_enough`) — a plant that's
-/// never reached flowering height hasn't formed any bud yet to show, the
-/// one case this doesn't just duplicate `bloom_intensity_target` already
-/// being 0 there (rather than reading `flowering_height_threshold` itself,
-/// which lives in `PlantConfig`, not this render-only `SceneLayout`).
+/// whole bloom directly — a real flower opens/closes gradually in size, and
+/// renders as a zero-area (invisible) mesh at exactly 0.0, the same as a
+/// plant that's never bloomed at all.
 pub fn flower_transform(curve: &StemCurve, total_height: f64, bloom_intensity: f64, layout: &SceneLayout) -> Transform {
     let frame = frame_at_height(curve, total_height, layout);
     let scale = layout.flower_scale * bloom_intensity.clamp(0.0, 1.0) as f32;

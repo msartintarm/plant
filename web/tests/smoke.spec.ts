@@ -164,6 +164,38 @@ test("the auto-water toggle enables without erroring and disables the manual but
   await expect(waterButton).toBeEnabled();
 });
 
+function balanceLocator(page: Page) {
+  return page.getByText(/^\$\d+\.\d{2}$/);
+}
+
+async function readBalance(page: Page): Promise<number> {
+  const text = await balanceLocator(page).textContent();
+  return Number(text?.replace("$", ""));
+}
+
+test("watering costs money and enabling auto-water charges a one-time activation fee", async ({ page }) => {
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+
+  await expect(balanceLocator(page)).toHaveText("$100.00");
+
+  await openSettings(page);
+  const waterButton = page.getByRole("button", { name: "Water", exact: true });
+  await waterButton.click();
+  await expect(balanceLocator(page)).toHaveText("$99.90");
+
+  const beforeAutoWater = await readBalance(page);
+  await page.getByLabel("Auto-water").check();
+  await expect
+    .poll(async () => readBalance(page))
+    .toBeLessThanOrEqual(beforeAutoWater - 10 + 1e-9);
+
+  expect(errors).toEqual([]);
+});
+
 test("a default no-input session grows past the first leaf (real browser/wasm loop, not the native sim harness)", async ({
   page,
 }) => {
@@ -294,6 +326,71 @@ test("a flowering plant's bloom reading visibly grows then shrinks over a bloom 
     await page.waitForTimeout(1_000);
   }
   expect(low, `expected the bloom reading to shrink back down from its peak of ${peak}%, but it stayed at ${low}%`).toBeLessThan(peak - 20);
+
+  expect(errors).toEqual([]);
+});
+
+test("the take-cutting button is hidden on a too-young plant and appears once it's mature enough", async ({ page }) => {
+  test.setTimeout(90_000);
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+
+  const cuttingButton = page.getByRole("button", { name: "🌱 Take cutting" });
+  await expect(cuttingButton).not.toBeVisible();
+
+  await openSettings(page);
+  await page.getByLabel("Auto-water").check();
+  await page.getByLabel(/Speed:/).fill("20");
+
+  await expect(cuttingButton).toBeVisible({ timeout: 60_000 });
+
+  expect(errors).toEqual([]);
+});
+
+test("taking a cutting from the main-screen button adds to inventory without erroring", async ({ page }) => {
+  test.setTimeout(90_000);
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
+  await page.getByLabel("Auto-water").check();
+  await page.getByLabel(/Speed:/).fill("20");
+
+  const cuttingButton = page.getByRole("button", { name: "🌱 Take cutting" });
+  await expect(cuttingButton).toBeVisible({ timeout: 60_000 });
+  await cuttingButton.click();
+
+  await expect(page.getByRole("button", { name: "Add plant" })).toBeVisible({ timeout: 5_000 });
+
+  expect(errors).toEqual([]);
+});
+
+test("a planted cutting starts in Rooting and becomes established without erroring", async ({ page }) => {
+  test.setTimeout(90_000);
+  const errors = collectConsoleErrors(page);
+
+  await page.goto("/");
+  await expect(page.getByText("Loading engine…")).toBeHidden({ timeout: 15_000 });
+  await addFirstPlant(page);
+  await openSettings(page);
+  await page.getByLabel("Auto-water").check();
+  await page.getByLabel(/Speed:/).fill("20");
+
+  const cuttingButton = page.getByRole("button", { name: "🌱 Take cutting" });
+  await expect(cuttingButton).toBeVisible({ timeout: 60_000 });
+  await cuttingButton.click();
+
+  await page.getByRole("button", { name: "Add plant" }).click();
+  await expect(page.getByText(/Rooting:/)).toBeVisible({ timeout: 5_000 });
+
+  await page.getByLabel("Auto-water").check();
+  await page.getByLabel(/Speed:/).fill("20");
+  await expect(page.getByText(/Rooting:/)).not.toBeVisible({ timeout: 30_000 });
 
   expect(errors).toEqual([]);
 });

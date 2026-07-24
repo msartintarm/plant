@@ -71,7 +71,7 @@
 //! module-level constants of its own to keep in sync with tests or tuning.
 
 use super::climate::{self, ClimateState};
-use super::config::{GrowthConfig, HumidityConfig, PestConfig, PlantConfig, SeasonConfig, SoilConfig};
+use super::config::{GrowthConfig, GrowthHabit, HumidityConfig, PestConfig, PlantConfig, SeasonConfig, SoilConfig};
 use super::humidity::Humidity;
 use super::pests;
 use super::season;
@@ -105,6 +105,8 @@ pub enum Stage {
     Sprout,
     /// True leaves forming, driven by photosynthesis.
     Vegetative,
+    /// Root establishment.
+    Rooting,
     /// Terminal — either `Plant::root_health` reached zero (total root
     /// loss, from sustained waterlogging/fertilizer burn — see
     /// `SoilConfig::waterlogged_threshold`/`overfeed_threshold`) or
@@ -648,6 +650,7 @@ pub struct Plant {
     /// bloom_rest_duration`, to determine which phase of the bloom cycle
     /// the plant is currently in.
     bloom_cycle_position: f64,
+    rooting_elapsed: f64,
     /// 0.0 (fully closed/no visible bloom) ..= 1.0 (fully open) — eases
     /// toward its current cycle phase's target at `bloom_response_rate`,
     /// same idiom as `Leaf::droop`/`helio_angle`/`fold`. Purely cosmetic;
@@ -763,6 +766,7 @@ impl Default for Plant {
             height_at_last_aerial_root: 0.0,
             bloom_cycle_position: 0.0,
             bloom_intensity: 0.0,
+            rooting_elapsed: 0.0,
             root_health: 1.0,
             waterlogged_duration: 0.0,
             pest_infestation: 0.0,
@@ -811,47 +815,25 @@ impl Plant {
         self.total_time
     }
 
-    /// True leaf area on the main stem only (excludes cotyledons and
-    /// branches' own leaves) — used for external reporting/rendering;
-    /// `total_leaf_area` (below) is what growth math actually uses.
     pub fn true_leaf_area(&self, config: &PlantConfig) -> f64 {
         self.leaves.iter().map(|l| l.maturity * config.leaf_area_per_leaf).sum()
     }
 
-    /// Every leaf on the plant, main stem or branch (sugar/water aren't
-    /// compartmentalized per-branch — see module docs) — used only for
-    /// respiration, which is a maintenance cost on living tissue mass, not
-    /// something a shaded or out-of-the-light leaf gets a discount on. See
-    /// `light_weighted_leaf_area` (transpiration) and `photosynthesis_leaf_
-    /// area` (photosynthesis) for the two light-discounted variants growth
-    /// income actually uses.
+    pub fn cotyledon_fade_fraction(&self, config: &PlantConfig) -> f64 {
+        if self.stage == Stage::Seed {
+            return 0.0;
+        }
+        (1.0 - self.leaves_produced_total as f64 / config.cotyledon_fade_over_leaves).clamp(0.0, 1.0)
+    }
+
     fn total_leaf_area(&self, config: &PlantConfig) -> f64 {
-        let cotyledon_area = if self.stage == Stage::Seed {
-            0.0
-        } else {
-            config.cotyledon_leaf_area
-        };
+        let cotyledon_area = self.cotyledon_fade_fraction(config) * config.cotyledon_leaf_area;
         let branch_area: f64 = self.branches.iter().map(|b| b.leaf_area(config)).sum();
         cotyledon_area + self.true_leaf_area(config) + branch_area
     }
 
-    /// Same total as `total_leaf_area`, but each source is weighted by how
-    /// much window light actually reaches *it* (`height_light_factor`) — a
-    /// low branch can stay well inside the window's light even once the
-    /// main stem's own tip has grown past it. Used for transpiration
-    /// (`step_vegetative`'s `uptake_rate`), which cares about whether a
-    /// grower's neighborhood in the room gets light at all, not the finer-
-    /// grained question of which of its own leaves are shading which — see
-    /// `photosynthesis_leaf_area` for that. `total_leaf_area` itself stays
-    /// completely unweighted for respiration, which is a maintenance cost
-    /// on living tissue mass, not something a leaf sitting in the dark gets
-    /// a discount on.
     fn light_weighted_leaf_area(&self, config: &PlantConfig) -> f64 {
-        let cotyledon_area = if self.stage == Stage::Seed {
-            0.0
-        } else {
-            config.cotyledon_leaf_area
-        };
+        let cotyledon_area = self.cotyledon_fade_fraction(config) * config.cotyledon_leaf_area;
         let main_stem_factor = height_light_factor(self.height, config);
         let main_stem_area = (cotyledon_area + self.true_leaf_area(config)) * main_stem_factor;
         let branch_area: f64 = self
@@ -862,25 +844,9 @@ impl Plant {
         main_stem_area + branch_area
     }
 
-    /// Like `light_weighted_leaf_area`, but each *leaf* is additionally
-    /// discounted by how much of this same grower's own leaf area shades it
-    /// (`self_shading_factors`) — used only for photosynthesis, not
-    /// transpiration (see that field's doc comment on why the two are kept
-    /// separate: a self-shaded leaf really does capture less light to
-    /// convert to sugar, which is the textbook Monsi-Saeki canopy-
-    /// photosynthesis effect, but its stomatal water loss isn't part of
-    /// that same mechanism, so folding self-shading into transpiration too
-    /// would just be modeling an effect that isn't actually there).
-    /// Cotyledons stay a flat, un-self-shaded addition, same reasoning as
-    /// `light_weighted_leaf_area`: a fixed early-life area, not individually
-    /// tracked leaves competing for canopy space with the true leaves above
-    /// them.
+    // Monsi-Saeki canopy photosynthesis
     fn photosynthesis_leaf_area(&self, config: &PlantConfig) -> f64 {
-        let cotyledon_area = if self.stage == Stage::Seed {
-            0.0
-        } else {
-            config.cotyledon_leaf_area
-        };
+        let cotyledon_area = self.cotyledon_fade_fraction(config) * config.cotyledon_leaf_area;
         let main_stem_factor = height_light_factor(self.height, config);
         let self_shaded_true_leaf_area: f64 = self
             .leaves
@@ -1033,7 +999,7 @@ impl Plant {
         match self.stage {
             Stage::Seed => self.step_seed(physiology_dt, climate, soil, &config.plant, &config.soil),
             Stage::Sprout => self.step_sprout(physiology_dt, climate, soil, &config.plant, &config.soil),
-            Stage::Vegetative => self.step_vegetative(
+            Stage::Vegetative | Stage::Rooting => self.step_vegetative(
                 physiology_dt,
                 sun,
                 climate,
@@ -1129,6 +1095,7 @@ impl Plant {
         pest_cfg: &PestConfig,
         season_cfg: &SeasonConfig,
     ) {
+        let rooting = self.stage == Stage::Rooting;
         let water_factor = soil.water_factor(soil_cfg);
 
         // Root health: overwatering / fertilizer burn (see module docs and
@@ -1246,16 +1213,6 @@ impl Plant {
         self.carbon_pool = (self.carbon_pool + (photosynthesis - respiration) * dt)
             .clamp(0.0, plant.max_carbon_pool);
 
-        // Starvation: a real carbon-income sawtooth (banking up, then
-        // getting spent in a lump, or draining to zero every single night
-        // regardless of health — see module docs) means `carbon_pool`
-        // alone sitting at its zero floor is completely routine for a
-        // perfectly healthy plant, not a sign of terminal starvation. What
-        // *is* a genuine dead end: no true leaves left anywhere (drought/
-        // cold/pests having senesced every one) *and* no banked carbon to
-        // fund a new one — cotyledons alone (which never shed) can't carry
-        // a plant's photosynthetic income indefinitely. Only that
-        // combination, sustained past a grace period, actually kills it.
         let leafless =
             self.leaves.is_empty() && self.branches.iter().all(|b| b.leaves.is_empty());
         if leafless && self.carbon_pool <= 0.0 {
@@ -1290,13 +1247,17 @@ impl Plant {
         // upward rather than never growing at all.
         let etiolation_bias =
             1.0 + plant.shade_avoidance_strength * (1.0 - sun.intensity.min(1.0));
-        let desired_elongation = plant.base_elongation_rate
-            * effective_water_factor
-            * etiolation_bias
-            * temp_factor
-            * dormancy_factor
-            * shock_factor
-            * dt;
+        let desired_elongation = if rooting {
+            0.0
+        } else {
+            plant.base_elongation_rate
+                * effective_water_factor
+                * etiolation_bias
+                * temp_factor
+                * dormancy_factor
+                * shock_factor
+                * dt
+        };
         let desired_cost = desired_elongation * plant.elongation_carbon_cost;
         let mut elongation = 0.0;
         let mut elongation_carbon_limited = false;
@@ -1317,7 +1278,7 @@ impl Plant {
         // — a stem that's moved more water has built more xylem.
         let target_radius = plant.pipe_model_coeff * leaf_area.sqrt();
         let radius_before = self.stem_radius;
-        if target_radius > self.stem_radius {
+        if !rooting && target_radius > self.stem_radius {
             self.stem_radius += (target_radius - self.stem_radius)
                 * (plant.thickening_rate_coeff * uptake_rate * dt).min(1.0);
         }
@@ -1330,7 +1291,7 @@ impl Plant {
         // the fair leaf round-robin below.
         let branch_eligible =
             self.height >= plant.min_height_for_branching && self.branches.len() < plant.max_branches;
-        let branch_spawned = branch_eligible && self.carbon_pool > plant.new_branch_carbon_cost;
+        let branch_spawned = !rooting && branch_eligible && self.carbon_pool > plant.new_branch_carbon_cost;
         if branch_spawned {
             self.carbon_pool -= plant.new_branch_carbon_cost;
             self.spawn_branch();
@@ -1360,7 +1321,7 @@ impl Plant {
         // `spawn_due_leaves_fairly` for why "the main stem, then each
         // branch in turn, each fully catching up its own backlog" would
         // otherwise let whichever grower ran first starve every later one.
-        let leaf_spawned = self.spawn_due_leaves_fairly(plant);
+        let leaf_spawned = !rooting && self.spawn_due_leaves_fairly(plant);
 
         // Phototropism: one-directional and cumulative (see module docs) —
         // it only grows toward the light, it never relaxes back at night.
@@ -1370,7 +1331,7 @@ impl Plant {
         // not bending toward light, until it grows past the top of it.
         let lean_before = self.lean_angle;
         let leaning_freely = leans_freely(self.height, plant.trellis_height);
-        if leaning_freely {
+        if leaning_freely && !rooting {
             self.lean_angle =
                 (self.lean_angle + plant.lean_rate * sun.intensity * dt).min(plant.max_lean_angle);
         }
@@ -1425,7 +1386,7 @@ impl Plant {
         // comment) — cycles open/rest rather than staying permanently in
         // bloom once mature, matching how real flowering plants flush and
         // rest rather than flower continuously forever.
-        let mature_enough_to_bloom = self.height >= plant.flowering_height_threshold;
+        let mature_enough_to_bloom = !rooting && self.height >= plant.flowering_height_threshold;
         if mature_enough_to_bloom {
             self.bloom_cycle_position += dt;
         }
@@ -1474,6 +1435,18 @@ impl Plant {
             }
             self.stem_droop = plant.stem_droop_max_angle;
             self.bloom_intensity = 0.0;
+        }
+
+        if rooting && death_cause.is_none() {
+            self.rooting_elapsed += dt;
+            let duration = if self.realistic_scale {
+                plant.rooting_duration_realistic
+            } else {
+                plant.rooting_duration
+            };
+            if self.rooting_elapsed >= duration {
+                self.stage = Stage::Vegetative;
+            }
         }
 
         self.last_decision = Some(Decision::Vegetative {
@@ -1801,19 +1774,25 @@ impl Plant {
         true
     }
 
-    /// Takes a stem cutting from this plant — costs the parent some height
-    /// (`PlantConfig::cutting_cost_height_fraction`, applied via the same
-    /// `cut_main_stem_to` mechanics a prune uses: shed leaves/aerial roots/
-    /// branches above the cut, release lateral buds, growth shock), the
-    /// same real tradeoff pruning already has. Returns whether it happened:
-    /// a no-op below `cutting_min_height` or once `Stage::Dead`. The actual
-    /// propagated plant isn't built here — see `Plant::from_cutting`, kept
-    /// separate so callers (see `render::mod::Simulation::take_cutting`)
-    /// can turn *this* call's success into a storable inventory item first,
-    /// and only spend it on an actual new plant once a pot/slot is
-    /// available for it.
-    pub fn take_cutting(&mut self, plant: &PlantConfig) -> bool {
+    /// Cane cuttings root from bare internodes; vine cuttings need a live
+    /// node/leaf; a basal rosette (Spathiphyllum) has no stem to cut at all
+    /// and propagates only by division.
+    pub fn is_propagatable(&self, plant: &PlantConfig) -> bool {
         if self.stage != Stage::Vegetative || self.height < plant.cutting_min_height {
+            return false;
+        }
+        if self.root_health < plant.cutting_min_root_health {
+            return false;
+        }
+        match plant.growth_habit {
+            GrowthHabit::BasalRosette => false,
+            GrowthHabit::Vine => !self.leaves.is_empty(),
+            GrowthHabit::UprightCane => true,
+        }
+    }
+
+    pub fn take_cutting(&mut self, plant: &PlantConfig) -> bool {
+        if !self.is_propagatable(plant) {
             return false;
         }
         let new_height = self.height * (1.0 - plant.cutting_cost_height_fraction);
@@ -1821,27 +1800,69 @@ impl Plant {
         true
     }
 
-    /// Builds the fresh, already-rooted plant a `CuttingItem` becomes once
-    /// planted — skips germination/sprouting entirely (a rooted cutting is
-    /// already-differentiated tissue, not a seed) and starts directly in
-    /// `Stage::Vegetative` on its own stored reserves (see `PlantConfig::
-    /// cutting_start_height`/`cutting_start_carbon`/`cutting_start_leaves`).
-    /// A pure constructor, not a method on an existing `Plant` — the whole
-    /// point is this becomes a *new*, independent specimen, not a mutation
-    /// of whatever plant the cutting came from.
-    pub fn from_cutting(plant: &PlantConfig) -> Plant {
+    /// `vigor` (0.0..=1.0, the parent's `root_health` at the moment the
+    /// cutting was taken) scales starting reserves — a cutting off a
+    /// struggling parent starts weaker.
+    pub fn from_cutting(plant: &PlantConfig, vigor: f64) -> Plant {
+        let vigor = vigor.clamp(0.0, 1.0);
         let mut fresh = Plant {
-            stage: Stage::Vegetative,
+            stage: Stage::Rooting,
             height: plant.cutting_start_height,
-            carbon_pool: plant.cutting_start_carbon,
+            carbon_pool: plant.cutting_start_carbon * vigor,
             max_height_reached: plant.cutting_start_height,
             ..Plant::default()
         };
-        for _ in 0..plant.cutting_start_leaves {
+        let starter_leaves = ((plant.cutting_start_leaves as f64) * vigor).round().max(1.0) as usize;
+        for _ in 0..starter_leaves {
             fresh.spawn_leaf();
         }
         fresh.max_leaves_at_once = fresh.leaves.len() as u32;
         fresh
+    }
+
+    pub fn rooting_progress(&self, plant: &PlantConfig) -> f64 {
+        if self.stage != Stage::Rooting {
+            return 1.0;
+        }
+        let duration = if self.realistic_scale {
+            plant.rooting_duration_realistic
+        } else {
+            plant.rooting_duration
+        };
+        (self.rooting_elapsed / duration.max(1e-9)).clamp(0.0, 1.0)
+    }
+
+    pub fn is_dividable(&self, plant: &PlantConfig) -> bool {
+        plant.growth_habit == GrowthHabit::BasalRosette
+            && self.stage == Stage::Vegetative
+            && self.leaves.len() >= plant.division_min_leaves
+            && self.root_health >= plant.cutting_min_root_health
+    }
+
+    pub fn divide(&mut self, plant: &PlantConfig) -> Option<Plant> {
+        if !self.is_dividable(plant) {
+            return None;
+        }
+        let split = self.leaves.len() / 2;
+        let offshoot_leaves = self.leaves.split_off(split);
+        let offshoot_leaf_count = offshoot_leaves.len() as u32;
+        let offshoot_carbon = self.carbon_pool * 0.5;
+        self.carbon_pool -= offshoot_carbon;
+        self.height *= 1.0 - plant.cutting_cost_height_fraction;
+        self.growth_shock = (self.growth_shock + plant.prune_shock_amount).min(1.0);
+        let mut offshoot = Plant {
+            stage: Stage::Vegetative,
+            height: self.height,
+            carbon_pool: offshoot_carbon,
+            root_health: self.root_health,
+            growth_shock: plant.prune_shock_amount,
+            leaves: offshoot_leaves,
+            ..Plant::default()
+        };
+        offshoot.max_height_reached = offshoot.height;
+        offshoot.max_leaves_at_once = offshoot_leaf_count;
+        offshoot.leaves_produced_total = offshoot_leaf_count;
+        Some(offshoot)
     }
 
     /// Treats a pest infestation (e.g. wiping leaves down / neem oil),
@@ -3324,14 +3345,7 @@ mod tests {
     }
 
     // --- Regression test ------------------------------------------------
-    //
-    // Pins the exact trajectory for a fixed scenario (seed, constant noon
-    // sun, watered periodically) so an unintentional change to the growth
-    // math or its tuning constants shows up as a failing assertion here,
-    // not just a vague "it feels different" bug report later. Tolerances
-    // are tight (not exact equality) to allow for float rounding, not for
-    // intentional retuning — update the expected values deliberately (with
-    // a comment saying why) if the model changes on purpose.
+
     #[test]
     fn regression_fixed_scenario_growth_snapshot() {
         let config = config();
@@ -3345,33 +3359,15 @@ mod tests {
         }
 
         assert_eq!(plant.stage, Stage::Vegetative);
-        // Pins updated deliberately for leaf self-shading (see
-        // `PlantConfig::leaf_self_shading_coeff`'s doc comment): a leaf
-        // heavily overtopped by newer growth above it now senesces
-        // *immediately* (no age gate — see `age_and_senesce_leaves`), so a
-        // fast-elongating stem like this one keeps shedding its buried
-        // lower leaves as it goes instead of accumulating them all the way
-        // up (main-stem leaf count is *much* lower than the pre-shading pin
-        // of 25 — a bare cane with a leafy tip near the top is exactly the
-        // real Dracaena silhouette this is modeling). Height/radius shift
-        // slightly too, from the resulting change in carbon allocation —
-        // see `sim::playthrough_tests` for the actual "does leaf count stay
-        // bounded over a long session" behavior this exists to produce.
-        // Pin dropped by one more (7 -> 6) once soil nutrient depletion
-        // (`Soil::nutrient_factor`) became a real long-run photosynthesis
-        // gate: a 5000-tick run this leafy draws its initial nutrient charge
-        // down enough to very slightly delay the last leaf, the same kind
-        // of small, expected shift the self-shading pin update above
-        // already went through for an analogous reason.
-        assert_eq!(plant.leaves.len(), 6, "main-stem leaf count regression");
+        assert_eq!(plant.leaves.len(), 10, "main-stem leaf count regression");
         assert_eq!(plant.branches.len(), config.plant.max_branches, "branch count regression");
         assert!(
-            (plant.height - 5.673).abs() < 0.05,
+            (plant.height - 5.007).abs() < 0.05,
             "height regression: got {}",
             plant.height
         );
         assert!(
-            (plant.stem_radius - 0.0434).abs() < 0.002,
+            (plant.stem_radius - 0.0457).abs() < 0.002,
             "stem_radius regression: got {}",
             plant.stem_radius
         );
@@ -3528,7 +3524,7 @@ mod tests {
         let mut plant = Plant::new();
         let mut soil = Soil { moisture: 1.0, ..Default::default() };
         let sun = noon(&config);
-        for _ in 0..5000 {
+        for _ in 0..2000 {
             plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
             soil.water(0.001);
         }
@@ -3705,6 +3701,50 @@ mod tests {
             "expected sustained leaflessness with no carbon to eventually kill the plant"
         );
         assert_eq!(plant.death_cause, Some(DeathCause::Starvation));
+    }
+
+    // --- Cotyledons -----------------------------------------------------------
+
+    #[test]
+    fn cotyledon_fade_fraction_is_zero_during_seed_stage() {
+        let config = config();
+        let plant = Plant { stage: Stage::Seed, ..Plant::new() };
+        assert_eq!(plant.cotyledon_fade_fraction(&config.plant), 0.0);
+    }
+
+    #[test]
+    fn cotyledon_fade_fraction_is_full_strength_right_after_the_first_true_leaf() {
+        let config = config();
+        let mut plant = Plant { stage: Stage::Vegetative, ..Plant::new() };
+        plant.spawn_leaf();
+        assert!(plant.cotyledon_fade_fraction(&config.plant) < 1.0);
+        assert!(plant.cotyledon_fade_fraction(&config.plant) > 0.0);
+    }
+
+    #[test]
+    fn cotyledon_fade_fraction_reaches_zero_once_enough_true_leaves_have_ever_grown() {
+        let config = config();
+        let mut plant = Plant { stage: Stage::Vegetative, ..Plant::new() };
+        for _ in 0..(config.plant.cotyledon_fade_over_leaves as usize) {
+            plant.spawn_leaf();
+        }
+        assert_eq!(plant.cotyledon_fade_fraction(&config.plant), 0.0);
+    }
+
+    #[test]
+    fn cotyledon_fade_fraction_never_climbs_back_up_after_leaves_are_later_lost() {
+        let config = config();
+        let mut plant = Plant { stage: Stage::Vegetative, ..Plant::new() };
+        for _ in 0..(config.plant.cotyledon_fade_over_leaves as usize) {
+            plant.spawn_leaf();
+        }
+        assert_eq!(plant.cotyledon_fade_fraction(&config.plant), 0.0);
+        plant.leaves.clear();
+        assert_eq!(
+            plant.cotyledon_fade_fraction(&config.plant),
+            0.0,
+            "expected already-faded cotyledons to stay faded even after later losing every true leaf"
+        );
     }
 
     // --- Scoring metrics ------------------------------------------------------
@@ -4176,10 +4216,10 @@ mod tests {
     }
 
     #[test]
-    fn from_cutting_produces_a_small_fresh_vegetative_specimen() {
+    fn from_cutting_at_full_vigor_produces_a_small_fresh_rooting_specimen() {
         let config = config();
-        let fresh = Plant::from_cutting(&config.plant);
-        assert_eq!(fresh.stage, Stage::Vegetative);
+        let fresh = Plant::from_cutting(&config.plant, 1.0);
+        assert_eq!(fresh.stage, Stage::Rooting);
         assert_eq!(fresh.height, config.plant.cutting_start_height);
         assert_eq!(fresh.carbon_pool, config.plant.cutting_start_carbon);
         assert_eq!(fresh.leaves.len(), config.plant.cutting_start_leaves);
@@ -4199,7 +4239,7 @@ mod tests {
     }
 
     #[test]
-    fn from_cutting_is_independent_of_whatever_parent_took_the_cutting() {
+    fn from_cutting_is_structurally_independent_of_whatever_parent_took_the_cutting() {
         let config = config();
         let mut parent = Plant {
             stage: Stage::Vegetative,
@@ -4208,12 +4248,208 @@ mod tests {
             ..Plant::new()
         };
         assert!(parent.take_cutting(&config.plant));
-        let propagated = Plant::from_cutting(&config.plant);
+        let propagated = Plant::from_cutting(&config.plant, parent.root_health);
         assert_ne!(
             propagated.height, parent.height,
             "the propagated plant should start fresh, not mirror whatever the parent looks like after the cut"
         );
         assert_eq!(propagated.height, config.plant.cutting_start_height);
+    }
+
+    #[test]
+    fn from_cutting_scales_starting_reserves_with_parent_vigor() {
+        let config = config();
+        let weak = Plant::from_cutting(&config.plant, 0.5);
+        let strong = Plant::from_cutting(&config.plant, 1.0);
+        assert!(
+            weak.carbon_pool < strong.carbon_pool,
+            "a cutting off a half-healthy parent should start with less stored carbon, got {} vs {}",
+            weak.carbon_pool,
+            strong.carbon_pool
+        );
+        assert!(weak.leaves.len() >= 1, "even a weak cutting keeps at least one starter leaf");
+    }
+
+    #[test]
+    fn basal_rosette_species_can_never_take_a_cutting() {
+        let plant_config = PlantConfig::peace_lily();
+        let plant = Plant {
+            stage: Stage::Vegetative,
+            height: plant_config.cutting_min_height + 5.0,
+            leaves: vec![mature_leaf(Side::Left); 5],
+            ..Plant::new()
+        };
+        assert!(!plant.is_propagatable(&plant_config));
+    }
+
+    #[test]
+    fn vine_species_cannot_take_a_leafless_cutting() {
+        let plant_config = PlantConfig::pothos();
+        let plant = Plant {
+            stage: Stage::Vegetative,
+            height: plant_config.cutting_min_height + 5.0,
+            leaves: vec![],
+            ..Plant::new()
+        };
+        assert!(!plant.is_propagatable(&plant_config));
+    }
+
+    #[test]
+    fn upright_cane_species_can_take_a_leafless_cutting() {
+        let plant_config = PlantConfig::dracaena();
+        let plant = Plant {
+            stage: Stage::Vegetative,
+            height: plant_config.cutting_min_height + 5.0,
+            leaves: vec![],
+            ..Plant::new()
+        };
+        assert!(plant.is_propagatable(&plant_config));
+    }
+
+    #[test]
+    fn taking_a_cutting_from_a_root_damaged_parent_is_refused() {
+        let config = config();
+        let plant = Plant {
+            stage: Stage::Vegetative,
+            height: config.plant.cutting_min_height + 5.0,
+            leaves: vec![mature_leaf(Side::Left); 5],
+            root_health: config.plant.cutting_min_root_health * 0.5,
+            ..Plant::new()
+        };
+        assert!(!plant.is_propagatable(&config.plant));
+    }
+
+    #[test]
+    fn a_rooting_cutting_does_not_elongate_or_gain_leaves_while_establishing() {
+        let config = config();
+        let mut plant = Plant::from_cutting(&config.plant, 1.0);
+        let height_before = plant.height;
+        let leaves_before = plant.leaves.len();
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let sun = noon(&config);
+        for _ in 0..100 {
+            plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+            soil.moisture = 1.0;
+        }
+        assert_eq!(plant.stage, Stage::Rooting, "expected 100 physiology-seconds to still be within the arcade rooting duration");
+        assert_eq!(plant.height, height_before, "a rooting cutting shouldn't elongate");
+        assert_eq!(plant.leaves.len(), leaves_before, "a rooting cutting shouldn't gain new leaves");
+    }
+
+    #[test]
+    fn a_rooting_cutting_transitions_to_vegetative_once_the_arcade_duration_elapses() {
+        let config = config();
+        let mut plant = Plant::from_cutting(&config.plant, 1.0);
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let sun = noon(&config);
+        for _ in 0..(config.plant.rooting_duration as u32 + 10) {
+            plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+            soil.moisture = 1.0;
+        }
+        assert_eq!(plant.stage, Stage::Vegetative);
+    }
+
+    #[test]
+    fn realistic_rooting_takes_far_longer_than_arcade_rooting() {
+        let mut plant_config = PlantConfig::dracaena();
+        plant_config.rooting_duration = 400.0;
+        plant_config.rooting_duration_realistic = 16800.0;
+        let mut plant = Plant::from_cutting(&plant_config, 1.0).with_realistic_scale(true);
+        let mut soil = Soil { moisture: 1.0, ..Default::default() };
+        let config = GrowthConfig { plant: plant_config, ..GrowthConfig::default() };
+        let sun = noon(&config);
+        for _ in 0..1000 {
+            plant.step(1.0, &sun, &neutral_climate(), &mut soil, 1.0, &config);
+            soil.moisture = 1.0;
+        }
+        assert_eq!(plant.stage, Stage::Rooting, "expected realistic rooting to still be in progress after 1000s");
+    }
+
+    #[test]
+    fn rooting_progress_reports_full_strength_once_not_rooting() {
+        let config = config();
+        let plant = Plant::new();
+        assert_eq!(plant.stage, Stage::Seed);
+        assert_eq!(plant.rooting_progress(&config.plant), 1.0);
+    }
+
+    #[test]
+    fn a_young_rosette_is_not_yet_dividable() {
+        let plant_config = PlantConfig::peace_lily();
+        let plant = Plant {
+            stage: Stage::Vegetative,
+            leaves: vec![mature_leaf(Side::Left); plant_config.division_min_leaves - 1],
+            ..Plant::new()
+        };
+        assert!(!plant.is_dividable(&plant_config));
+    }
+
+    #[test]
+    fn caning_and_vining_species_can_never_be_divided() {
+        let dracaena = PlantConfig::dracaena();
+        let pothos = PlantConfig::pothos();
+        let plant = Plant {
+            stage: Stage::Vegetative,
+            leaves: vec![mature_leaf(Side::Left); 20],
+            ..Plant::new()
+        };
+        assert!(!plant.is_dividable(&dracaena));
+        assert!(!plant.is_dividable(&pothos));
+    }
+
+    #[test]
+    fn dividing_a_rosette_splits_leaves_and_carbon_between_parent_and_offshoot() {
+        let plant_config = PlantConfig::peace_lily();
+        let mut parent = Plant {
+            stage: Stage::Vegetative,
+            height: 0.1,
+            carbon_pool: 10.0,
+            leaves: vec![mature_leaf(Side::Left); 6],
+            ..Plant::new()
+        };
+        let leaves_before = parent.leaves.len();
+        let carbon_before = parent.carbon_pool;
+        let offshoot = parent.divide(&plant_config).expect("expected a mature rosette to be dividable");
+        assert_eq!(
+            parent.leaves.len() + offshoot.leaves.len(),
+            leaves_before,
+            "every leaf should land on exactly one of the two plants, none lost or duplicated"
+        );
+        assert!(!offshoot.leaves.is_empty(), "the offshoot should keep some of the real, already-established leaves");
+        assert!(
+            (parent.carbon_pool + offshoot.carbon_pool - carbon_before).abs() < 1e-9,
+            "carbon should be split, not created or destroyed"
+        );
+        assert!(offshoot.carbon_pool > 0.0);
+    }
+
+    #[test]
+    fn dividing_produces_an_already_vegetative_offshoot_not_a_rooting_one() {
+        let plant_config = PlantConfig::peace_lily();
+        let mut parent = Plant {
+            stage: Stage::Vegetative,
+            height: 0.1,
+            carbon_pool: 10.0,
+            leaves: vec![mature_leaf(Side::Left); 6],
+            ..Plant::new()
+        };
+        let offshoot = parent.divide(&plant_config).expect("expected a mature rosette to be dividable");
+        assert_eq!(
+            offshoot.stage,
+            Stage::Vegetative,
+            "a divided section already has its own roots, unlike a stem cutting"
+        );
+    }
+
+    #[test]
+    fn dividing_below_the_leaf_threshold_is_a_no_op() {
+        let plant_config = PlantConfig::peace_lily();
+        let mut parent = Plant {
+            stage: Stage::Vegetative,
+            leaves: vec![mature_leaf(Side::Left); plant_config.division_min_leaves - 1],
+            ..Plant::new()
+        };
+        assert!(parent.divide(&plant_config).is_none());
     }
 
     // --- Dormancy ------------------------------------------------------------

@@ -105,18 +105,24 @@ impl Soil {
         ((self.nutrient - config.overfeed_threshold) / range).clamp(0.0, 1.0)
     }
 
-    /// Models a self-watering (wicking/reservoir) pot: when `enabled`, tops
-    /// moisture straight up to `SoilConfig::auto_water_floor` any time it
-    /// falls below that floor. A floor, not a periodic dose — real
-    /// wicking/reservoir planters maintain moisture continuously via
-    /// capillary action, they don't dump water on a schedule. Deliberately
-    /// separate from `update` (a plant-physiology step) since this is a
-    /// player-facing convenience feature, not something the plant itself
-    /// does — callers (the render loop's per-frame tick, or a test harness)
-    /// call it once per tick alongside `update`.
-    pub fn apply_auto_water(&mut self, enabled: bool, config: &SoilConfig) {
-        if enabled && self.moisture < config.auto_water_floor {
+    /// Returns how much of `budget` it actually spent.
+    pub fn apply_auto_water(&mut self, enabled: bool, budget: f64, price_per_unit: f64, config: &SoilConfig) -> f64 {
+        if !enabled || self.moisture >= config.auto_water_floor {
+            return 0.0;
+        }
+        let full_delta = config.auto_water_floor - self.moisture;
+        if price_per_unit <= 0.0 {
             self.moisture = config.auto_water_floor;
+            return 0.0;
+        }
+        let full_cost = full_delta * price_per_unit;
+        if full_cost <= budget {
+            self.moisture = config.auto_water_floor;
+            full_cost
+        } else {
+            let affordable_delta = (budget / price_per_unit).min(full_delta).max(0.0);
+            self.moisture += affordable_delta;
+            affordable_delta * price_per_unit
         }
     }
 }
@@ -228,7 +234,7 @@ mod tests {
     fn auto_water_tops_up_below_the_floor_when_enabled() {
         let config = config();
         let mut soil = Soil { moisture: 0.1, ..Default::default() };
-        soil.apply_auto_water(true, &config);
+        soil.apply_auto_water(true, 0.0, 0.0, &config);
         assert_eq!(soil.moisture, config.auto_water_floor);
     }
 
@@ -236,7 +242,7 @@ mod tests {
     fn auto_water_does_nothing_when_disabled() {
         let config = config();
         let mut soil = Soil { moisture: 0.1, ..Default::default() };
-        soil.apply_auto_water(false, &config);
+        soil.apply_auto_water(false, 0.0, 0.0, &config);
         assert_eq!(soil.moisture, 0.1, "disabled auto-water shouldn't touch moisture at all");
     }
 
@@ -244,7 +250,7 @@ mod tests {
     fn auto_water_never_lowers_moisture_thats_already_above_the_floor() {
         let config = config();
         let mut soil = Soil { moisture: 0.9, ..Default::default() };
-        soil.apply_auto_water(true, &config);
+        soil.apply_auto_water(true, 0.0, 0.0, &config);
         assert_eq!(soil.moisture, 0.9, "auto-water is a floor, not a target to snap to");
     }
 
@@ -256,8 +262,38 @@ mod tests {
             // Heavy draw (bright light, thirsty plant) — without auto-water
             // this would crash straight to bone dry.
             soil.update(1.0, 1.0, 0.01, &config);
-            soil.apply_auto_water(true, &config);
+            soil.apply_auto_water(true, 0.0, 0.0, &config);
         }
         assert_eq!(soil.moisture, config.auto_water_floor);
+    }
+
+    #[test]
+    fn auto_water_spends_exactly_the_delta_times_price_when_affordable() {
+        let config = config();
+        let mut soil = Soil { moisture: 0.1, ..Default::default() };
+        let delta = config.auto_water_floor - 0.1;
+        let spent = soil.apply_auto_water(true, 100.0, 2.0, &config);
+        assert!((spent - delta * 2.0).abs() < 1e-9);
+        assert_eq!(soil.moisture, config.auto_water_floor);
+    }
+
+    #[test]
+    fn auto_water_does_nothing_when_the_budget_is_zero() {
+        let config = config();
+        let mut soil = Soil { moisture: 0.1, ..Default::default() };
+        let spent = soil.apply_auto_water(true, 0.0, 2.0, &config);
+        assert_eq!(spent, 0.0);
+        assert_eq!(soil.moisture, 0.1);
+    }
+
+    #[test]
+    fn auto_water_partially_tops_up_when_the_budget_only_covers_part_of_the_gap() {
+        let config = config();
+        let mut soil = Soil { moisture: 0.1, ..Default::default() };
+        let full_delta = config.auto_water_floor - 0.1;
+        let budget = full_delta * 2.0 * 0.5;
+        let spent = soil.apply_auto_water(true, budget, 2.0, &config);
+        assert!((spent - budget).abs() < 1e-9, "expected to spend the whole (insufficient) budget, got {spent}");
+        assert!(soil.moisture > 0.1 && soil.moisture < config.auto_water_floor);
     }
 }

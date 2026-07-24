@@ -62,6 +62,8 @@ interface EngineStats {
   alive_duration: number;
   alive_days: number;
   bloom_intensity: number;
+  rooting_progress: number;
+  balance: number;
 }
 
 interface ScreenPosition {
@@ -85,8 +87,8 @@ interface EngineSimulation {
   start(): void;
   stop(): void;
   resize(width: number, height: number, devicePixelRatio: number): void;
-  water(amount: number): void;
-  water_plant(index: number, amount: number): void;
+  water(amount: number): boolean;
+  water_plant(index: number, amount: number): boolean;
   fertilize(amount: number): void;
   mist(amount: number): void;
   treat_pests(): void;
@@ -94,9 +96,12 @@ interface EngineSimulation {
   prune_branch(index: number): boolean;
   repot(): boolean;
   take_cutting(): boolean;
+  can_take_cutting(): boolean;
+  divide_plant(): boolean;
+  can_divide_plant(): boolean;
   set_pot_position(position: number): void;
   set_time_scale(multiplier: number): void;
-  set_auto_water(enabled: boolean): void;
+  set_auto_water(enabled: boolean): boolean;
   set_species(species: string, realisticScale: boolean): void;
   restart(): void;
   set_pointer_position(x: number, y: number): void;
@@ -153,9 +158,11 @@ const STATS_POLL_MS = 250;
 // immediate, large enough that a slightly wobbly tap still prunes.
 const DRAG_THRESHOLD_PX = 4;
 const WATER_DOSE = 0.05;
+const WATER_COST_PER_CLICK = 0.1;
+const AUTO_WATER_ACTIVATION_COST = 10;
 const FERTILIZE_DOSE = 0.3;
 const MIST_DOSE = 0.3;
-const DEFAULT_TIME_SCALE = 2.0;
+const DEFAULT_TIME_SCALE = 6.0;
 const DEFAULT_SPECIES = "dracaena";
 const SPECIES_OPTIONS: { value: string; label: string }[] = [
   { value: "dracaena", label: "Dracaena (branching)" },
@@ -249,6 +256,8 @@ export default function EngineCanvas() {
   const [potHuds, setPotHuds] = useState<PlantPotHud[]>([]);
   const [lampPosition, setLampPosition] = useState<ScreenPosition | null>(null);
   const [debugUnlocked, setDebugUnlocked] = useState(false);
+  const [canTakeCutting, setCanTakeCutting] = useState(false);
+  const [canDividePlant, setCanDividePlant] = useState(false);
   const [newPlantSpecies, setNewPlantSpecies] = useState(DEFAULT_SPECIES);
   const [newPlantRealisticScale, setNewPlantRealisticScale] = useState(false);
   // One entry per stem cutting waiting to be planted (see `Simulation::
@@ -453,6 +462,8 @@ export default function EngineCanvas() {
       setPlantTabs(tabs);
       setPotHuds(huds);
       setLampPosition(sim.lamp_screen_position());
+      setCanTakeCutting(sim.can_take_cutting());
+      setCanDividePlant(sim.can_divide_plant());
       const selected = sim.selected_plant_index();
       setSelectedPlantIndex(selected);
       // Keeps the HUD's own species selector and pot-placement slider
@@ -504,6 +515,7 @@ export default function EngineCanvas() {
   }, [status]);
 
   const isDead = stats?.stage === "Dead";
+  const isRooting = stats?.stage === "Rooting";
   const inventoryCounts = inventory.reduce<Record<string, number>>((acc, s) => {
     acc[s] = (acc[s] ?? 0) + 1;
     return acc;
@@ -554,6 +566,10 @@ export default function EngineCanvas() {
     simRef.current?.take_cutting();
   }
 
+  function handleDividePlant() {
+    simRef.current?.divide_plant();
+  }
+
   function handleRestart() {
     simRef.current?.restart();
   }
@@ -580,7 +596,8 @@ export default function EngineCanvas() {
   function handleAutoWaterToggle(e: React.ChangeEvent<HTMLInputElement>) {
     const enabled = e.target.checked;
     setAutoWater(enabled);
-    simRef.current?.set_auto_water(enabled);
+    const applied = simRef.current?.set_auto_water(enabled);
+    if (applied === false) setAutoWater(!enabled);
   }
 
   function handleToolChange(tool: "prune" | "trim") {
@@ -632,7 +649,7 @@ export default function EngineCanvas() {
               type="button"
               onClick={() => handleWaterPlant(index)}
               className={styles.actionButton}
-              disabled={hud.auto_water_enabled || hud.is_dead}
+              disabled={hud.auto_water_enabled || hud.is_dead || (stats?.balance ?? 0) < WATER_COST_PER_CLICK}
               aria-label={`Water plant ${index + 1}`}
             >
               Water
@@ -736,10 +753,34 @@ export default function EngineCanvas() {
               🔪 Prune
             </button>
           )}
+          {canTakeCutting && (
+            <button
+              type="button"
+              onClick={handleTakeCutting}
+              className={styles.toolButton}
+              title="Take a stem cutting to plant elsewhere"
+            >
+              🌱 Take cutting
+            </button>
+          )}
+          {canDividePlant && (
+            <button
+              type="button"
+              onClick={handleDividePlant}
+              className={styles.toolButton}
+              title="Split this rosette into two already-rooted plants"
+            >
+              🪴 Divide
+            </button>
+          )}
         </div>
       )}
       {stats && (
         <div className={styles.topRightStack}>
+          <div className={styles.seasonPlaque} title="Money left to spend on water">
+            <span className={styles.seasonIcon}>💰</span>
+            <span className={styles.seasonText}>${stats.balance.toFixed(2)}</span>
+          </div>
           <div className={styles.seasonPlaque} title={`Day ${stats.days_elapsed} of this plant's life`}>
             <span className={styles.seasonIcon}>{SEASON_ICONS[stats.season] ?? "🗓️"}</span>
             <span className={styles.seasonText}>
@@ -849,6 +890,13 @@ export default function EngineCanvas() {
                   {stats.day_length_factor > 0.85 ? "🌱 Growing" : stats.day_length_factor > 0.6 ? "🍂 Slowing" : "❄️ Dormant"}
                 </span>
               </div>
+              {isRooting && (
+                <div className={styles.hudRow}>
+                  <span title="Establishing its own root system — no new growth until rooted">
+                    🌱 Rooting: {formatPercent(stats.rooting_progress)}
+                  </span>
+                </div>
+              )}
               <div className={styles.hudRow}>
                 <span>Height: {formatHeight(stats.height)}</span>
                 <span>
@@ -863,12 +911,18 @@ export default function EngineCanvas() {
                   type="button"
                   onClick={handleWater}
                   className={styles.actionButton}
-                  disabled={autoWater || isDead}
+                  disabled={autoWater || isDead || stats.balance < WATER_COST_PER_CLICK}
+                  title={`Costs $${WATER_COST_PER_CLICK.toFixed(2)}`}
                 >
                   Water
                 </button>
-                <label className={styles.autoWaterLabel}>
-                  <input type="checkbox" checked={autoWater} onChange={handleAutoWaterToggle} disabled={isDead} />
+                <label className={styles.autoWaterLabel} title={`Costs $${AUTO_WATER_ACTIVATION_COST.toFixed(2)} to turn on`}>
+                  <input
+                    type="checkbox"
+                    checked={autoWater}
+                    onChange={handleAutoWaterToggle}
+                    disabled={isDead || (!autoWater && stats.balance < AUTO_WATER_ACTIVATION_COST)}
+                  />
                   Auto-water
                 </label>
               </div>
@@ -888,7 +942,7 @@ export default function EngineCanvas() {
                 <span title="Drops from sustained overwatering or over-fertilizing — a damaged root system can wilt even when the soil reads fully watered">
                   🪴 Root health: {formatPercent(stats.root_health)}
                 </span>
-                <button type="button" onClick={handleRepot} className={styles.actionButton} disabled={isDead}>
+                <button type="button" onClick={handleRepot} className={styles.actionButton} disabled={isDead || isRooting}>
                   Repot
                 </button>
               </div>
@@ -925,7 +979,7 @@ export default function EngineCanvas() {
               </div>
 
               <div className={styles.hudRow}>
-                <button type="button" onClick={handlePruneMainStem} className={styles.actionButton} disabled={isDead}>
+                <button type="button" onClick={handlePruneMainStem} className={styles.actionButton} disabled={isDead || isRooting}>
                   Prune stem
                 </button>
                 <button
@@ -935,9 +989,6 @@ export default function EngineCanvas() {
                   disabled={isDead || stats.branch_count <= 0}
                 >
                   Prune branch
-                </button>
-                <button type="button" onClick={handleTakeCutting} className={styles.actionButton} disabled={isDead}>
-                  Take cutting
                 </button>
               </div>
 
